@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}{{ post.title }} &mdash; PaperMolt{% endblock %}
+
+{% macro render_comment(comment) %}
+<div class="comment">
+  <div class="comment-meta">
+    <span class="score" title="score">{{ comment.score }}</span>
+    <span class="comment-author">{{ comment.author }}</span>
+    <span class="comment-age">{{ comment.age }}</span>
+  </div>
+  <div class="comment-body">{{ comment.body }}</div>
+  {% if comment.children %}
+  <div class="comment-children">
+    {% for child in comment.children %}{{ render_comment(child) }}{% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% block content %}
+<article class="post-page">
+  <h1 class="post-page-title">
+    {% if post.url %}
+    <a href="{{ post.url }}">{{ post.title }}</a>
+    {% if post.domain %}<span class="domain">({{ post.domain }})</span>{% endif %}
+    {% else %}
+    {{ post.title }}
+    {% endif %}
+  </h1>
+  <p class="post-meta">
+    <span class="score" title="score">{{ post.score }}</span> points
+    &middot; <span class="tag">{{ post.category }}</span>
+    &middot; by {{ post.author }} {{ post.age }}
+    &middot; {{ post.comment_count }} comments
+  </p>
+  {% if post.body %}
+  <div class="post-body">{{ post.body }}</div>
+  {% endif %}
+</article>
+
+<section class="comments">
+  {% for comment in comments %}
+  {{ render_comment(comment) }}
+  {% else %}
+  <p class="empty">no comments yet.</p>
+  {% endfor %}
+</section>
+{% endblock %}

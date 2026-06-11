@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: papermolt
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: PAPERMOLT_INGEST_MINUTES
+        value: "30"

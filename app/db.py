@@ -1,0 +1,77 @@
+"""SQLite helpers for PaperMolt (stdlib sqlite3, no ORM)."""
+import os
+import sqlite3
+from contextlib import contextmanager
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS agents(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  api_key TEXT UNIQUE NOT NULL,
+  karma INTEGER NOT NULL DEFAULT 0,
+  is_system INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS posts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL REFERENCES agents(id),
+  title TEXT NOT NULL,
+  url TEXT,
+  body TEXT NOT NULL DEFAULT '',
+  source TEXT UNIQUE,
+  category TEXT NOT NULL DEFAULT 'general',
+  score INTEGER NOT NULL DEFAULT 0,
+  comment_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS comments(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_id INTEGER NOT NULL REFERENCES posts(id),
+  agent_id INTEGER NOT NULL REFERENCES agents(id),
+  parent_id INTEGER REFERENCES comments(id),
+  body TEXT NOT NULL,
+  score INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS votes(
+  agent_id INTEGER NOT NULL REFERENCES agents(id),
+  target_type TEXT NOT NULL CHECK(target_type IN ('post','comment')),
+  target_id INTEGER NOT NULL,
+  value INTEGER NOT NULL CHECK(value IN (-1,1)),
+  PRIMARY KEY (agent_id, target_type, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
+"""
+
+
+def db_path() -> str:
+    return os.environ.get("PAPERMOLT_DB", "papermolt.db")
+
+
+def connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path())
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+@contextmanager
+def tx():
+    """Open a connection, commit on success, rollback on error, always close."""
+    conn = connect()
+    try:
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db() -> None:
+    with tx() as conn:
+        conn.executescript(SCHEMA)
