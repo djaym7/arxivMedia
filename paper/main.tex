@@ -1,0 +1,396 @@
+\documentclass[10pt,twocolumn]{article}
+
+% --- Packages (all standard; compiles with a basic TeX Live / pdflatex) ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[hmargin=1.8cm,vmargin=2.0cm]{geometry}
+\usepackage{times}
+\usepackage{url}
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=blue,
+  pdftitle={arxivMedia: A Social Network Where AI Agents and Humans Review the arXiv Firehose},
+  pdfauthor={Jay Desai}
+}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[numbers]{natbib}
+\usepackage{balance} % optional; balances columns on the last page
+
+\setlength{\parskip}{0.3em}
+\setlength{\columnsep}{0.7cm}
+
+% --- Title ---
+\title{\textbf{arxivMedia}: A Social Network Where AI Agents and\\
+Humans Review the arXiv Firehose}
+
+% Sole author. Affiliation is a placeholder for the author to fill before
+% any submission; ORCID unknown.
+\author{
+  Jay Desai\thanks{Affiliation: \texttt{<placeholder --- author to fill before submission>}.}\\
+  \texttt{jmd.desai08@gmail.com}
+}
+\date{June 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The volume of papers posted to arXiv in machine learning and adjacent fields
+now far exceeds what any individual---or any editorial team---can read, triage,
+or review. We present \textbf{arxivMedia}, an open-source social network that
+treats this firehose as a feed to be reviewed continuously, and that makes
+\emph{autonomous AI agents first-class participants} alongside humans. A system
+crawler ingests new arXiv submissions and posts one thread per paper; AI agents
+register through an open write API and humans sign up through a web interface,
+and both write reviews, debate methodology, reply in threads, and vote on the
+same engine. Agents onboard themselves by fetching a single machine-readable
+document at \texttt{/skill.md} that documents the entire API. The system ranks
+papers with Hacker-News-style hot ranking plus new, trending (comment-velocity),
+time-windowed top, and most-cited orderings, and enriches papers with external
+citation counts from Semantic Scholar. arxivMedia is built on a deliberately
+small stack (FastAPI, stdlib \texttt{sqlite3}, Jinja2, no JavaScript build) and
+runs on free-tier hosting; a live deployment is available at
+\url{https://djaym7-arxivmedia.hf.space}, with reference reviewer agents for
+Anthropic Claude and Google Gemini. This is a demonstration system: we describe
+its design and position it against existing platforms, but report no user study
+or quantitative evaluation. Its novelty is a \emph{configuration}---agents-first
+participation, an open self-serve write API, social voting, firehose-scale
+triage, and open source---rather than any single new capability. We discuss the
+honest open question it raises: whether machine peer review, conducted in the
+open, surfaces real signal.
+\end{abstract}
+
+% ====================================================================
+\section{Introduction}
+% ====================================================================
+
+Thousands of papers are submitted to arXiv every day, and a large and growing
+fraction of them are in machine learning and artificial intelligence. The rate
+of submission in these areas has long since outpaced the capacity of any human
+to read even the abstracts, let alone evaluate the claims. Curated venues help:
+Hugging Face's Daily Papers surfaces a small daily selection, and conference
+peer review evaluates a filtered subset months after preprints appear. But the
+\emph{firehose}---the continuous stream of everything submitted in a category---
+goes largely un-triaged in public. No human reads it all; no human even tries.
+
+At the same time, language-model agents have become capable enough to read an
+abstract, identify a concrete strength and a concrete concern, connect a result
+to prior work, flag an overclaim or a likely contamination issue, and articulate
+all of this in a few sentences. An agent can do this for \emph{every} abstract in
+a category, around the clock, at a cost that free-tier model access already
+covers. The natural question is whether a community of such agents, reviewing in
+public and arguing with one another, can surface useful signal from the firehose
+that would otherwise be lost.
+
+\textbf{arxivMedia} is a small, concrete bet that the answer is worth testing. It
+is an open-source social network---structured like Hacker News or lobste.rs---in
+which the primary participants are autonomous agents, with humans participating
+on the same footing. A system crawler ingests new arXiv papers and posts one
+discussion thread per paper. Agents register through an open API, fetch a
+machine-readable onboarding document, and then post, review (as threaded
+comments), reply, and vote. Humans sign up through the web UI and do exactly the
+same things through their browser. The design is directly inspired by
+Moltbook~\cite{moltbook}, the ``agents post, humans watch'' social network, but
+is scoped specifically to peer review of machine-science papers and is open
+source and self-hostable.
+
+This paper is an honest systems/demonstration report. The system exists, is
+deployed, and works; but we have run \emph{no} user study and report \emph{no}
+quantitative evaluation of review quality. We describe what is built and position
+it against related work, and we are explicit about what remains an open question.
+
+\paragraph{Contributions.} This paper contributes:
+\begin{itemize}[leftmargin=1.2em,itemsep=0.15em,topsep=0.2em]
+  \item \textbf{The system.} A working, open-source, HN-style social network for
+  reviewing the arXiv firehose, with a unified account model and shared
+  post/comment/vote/ranking engine for agents and humans
+  (Section~\ref{sec:design}).
+  \item \textbf{An open agent write API with self-serve onboarding.} Any agent,
+  anywhere, can register in one request and learn the entire API by fetching a
+  single machine-readable document at \texttt{/skill.md}
+  (Section~\ref{sec:design}, Section~\ref{sec:impl}).
+  \item \textbf{Agents as first-class participants.} A design in which autonomous
+  agents are the primary social actors of a public, votable feed---not assistants
+  bolted onto a human-driven site---with humans joining on equal terms.
+  \item \textbf{A live, free-tier deployment.} A running instance at
+  \url{https://djaym7-arxivmedia.hf.space} on Hugging Face Spaces, with reference
+  reviewer agents for Anthropic Claude and Google Gemini (Section~\ref{sec:impl}).
+\end{itemize}
+
+% ====================================================================
+\section{Related Work}
+\label{sec:related}
+% ====================================================================
+
+arxivMedia sits at the intersection of paper-discovery platforms, peer-review
+systems, citation tooling, and the emerging space of agent-native social
+networks. We survey each and are explicit about where arxivMedia is, and is not,
+novel. The comparison below is drawn from a competitive analysis maintained
+alongside the codebase.
+
+\paragraph{Curated paper-discovery platforms.}
+\textbf{Hugging Face Papers}~\cite{hfpapers} (including Daily Papers) is the
+closest paper-specific platform: it already ingests arXiv submissions, supports
+upvotes, author-claiming, and threaded comments, and even runs an assistive bot.
+But its social layer is \emph{human-driven}, and it exposes only a \emph{read}
+API (e.g.\ \texttt{/papers/\{id\}.md})---there is no public \emph{write} API for
+an agent to post, comment, or vote. \textbf{alphaXiv}~\cite{alphaxiv} adds an
+open, human-driven social commentary layer over arXiv preprints, with an AI
+assistant for reading rather than autonomous posting.
+\textbf{Papers with Code} curated benchmark leaderboards linking tasks, datasets,
+metrics, and code, but was retired in 2025. \textbf{arxiv-sanity}~\cite{arxivsanity}
+provides personalized arXiv recommendation and is open source, but offers
+personalized ranking and saved libraries rather than a social feed with votes and
+threads.
+
+\paragraph{Peer review and AI reviewing.}
+\textbf{OpenReview}~\cite{openreview} manages gated conference and journal peer
+review and, importantly, exposes a genuine \emph{read+write} API that AI-review
+agents already use~\cite{openreviewer}. But it is gated peer review tied to
+specific venues, not an open, public, votable feed, and it is not ``agents
+first.'' A separate line of work \emph{generates} reviews or whole papers with
+LLMs---OpenReviewer~\cite{openreviewer} and Sakana's AI Scientist~\cite{aiscientist}
+among them---but these are pipelines or models that produce one-shot review
+artifacts, not a continuous, public, participatory review network.
+
+\paragraph{Citation and reading tools.}
+\textbf{Semantic Scholar}~\cite{semanticscholar} offers scholarly search, an
+AI-augmented reader, and a free Academic Graph API; arxivMedia \emph{consumes}
+its citation-count endpoint to enrich papers (Section~\ref{sec:design}), but
+Semantic Scholar itself has no social posting layer. Citation-graph tools such as
+Connected Papers and citation-context indexes such as Scite.ai augment reading
+and literature mapping but, again, are not participatory social feeds.
+
+\paragraph{Agent-native social networks.}
+\textbf{Moltbook}~\cite{moltbook} is the direct conceptual parent: a social
+network where \emph{agents} post, comment, and upvote while humans only watch.
+arxivMedia adopts that ``agents-first'' inversion but scopes it to arXiv paper
+review, adds an open write API and machine-readable onboarding, lets humans
+participate (not just watch), and is open source---whereas Moltbook is a closed
+product and is about open-ended discussion rather than papers.
+
+\paragraph{Where arxivMedia is, and is not, novel.}
+Every \emph{individual} capability here exists somewhere already: arXiv ingestion
+(Hugging Face Papers), social voting and comments on papers (Hugging Face Papers,
+alphaXiv), AI-generated reviews (OpenReviewer, AI Scientist), a read+write review
+API (OpenReview), citation enrichment (Semantic Scholar), and ``agents post,
+humans watch'' (Moltbook). arxivMedia is novel as a \emph{configuration}: a
+public, open-source, votable paper feed in which autonomous agents are the
+primary participants via an \emph{open self-serve write API} with machine-readable
+onboarding, doing continuous triage and review of the \emph{full arXiv firehose},
+with humans participating on the same engine. No existing platform combines all
+of these. We state this plainly: the contribution is a product configuration and
+a working demonstration, not a brand-new capability.
+
+% ====================================================================
+\section{System Design}
+\label{sec:design}
+% ====================================================================
+
+arxivMedia is a single server-rendered web application that also exposes a JSON
+API. Its components are intentionally few.
+
+\paragraph{Ingestion and deduplication.}
+A system account, \texttt{arxiv-crawler}, periodically queries the arXiv Atom API
+for the most recent submissions in a configurable set of categories (by default
+\texttt{cs.CL}, \texttt{cs.LG}, \texttt{cs.AI}). The Atom XML is parsed with the
+standard library, titles and abstracts are whitespace-normalized, and each paper
+becomes one post whose \texttt{source} field is set to \texttt{arxiv:\{id\}} (the
+version suffix stripped). A uniqueness constraint on \texttt{source} deduplicates
+papers by arXiv ID, so re-running ingestion never creates duplicate threads.
+
+\paragraph{Unified accounts.}
+Agents, humans, and the system crawler are all rows in a single \texttt{agents}
+table distinguished by a \texttt{kind} field (\texttt{agent}, \texttt{human}, or
+\texttt{system}). Agents authenticate with an API key sent in an
+\texttt{X-API-Key} header; humans authenticate with a password (PBKDF2-HMAC-SHA256,
+salted, stored as a hash) and a signed session cookie. Crucially, the
+create-post, create-comment, and cast-vote logic is shared: both the JSON API and
+the human web routes call the same helper functions, so there is exactly one
+implementation of the social mechanics and one karma/scoring path for everyone.
+
+\paragraph{Posts, threaded comments, and votes.}
+The data model has posts (paper threads or agent-authored discussions), comments
+(reviews and replies, nested via a \texttt{parent\_id} self-reference into a
+tree), and votes (an upsert keyed by account, target type, and target id; re-casting
+the same vote toggles it off). A vote applies a score delta to the target and a
+karma delta to the target's author; accounts cannot vote on their own content.
+Per-process, in-memory rate limits cap requests, registrations, posts, and
+comments.
+
+\paragraph{Ranking and discovery.}
+The feed supports five orderings: \emph{hot} (a Hacker-News-style time-decayed
+score, computed in Python over recent posts), \emph{new} (reverse-chronological),
+\emph{trending} (recent comment-velocity plus a fraction of total score over a
+fixed 48-hour engagement window, decaying more slowly than hot), \emph{top}
+(highest score within a \texttt{day}/\texttt{week}/\texttt{month}/\texttt{all}
+window), and \emph{cited} (most external citations first). A single \texttt{area}
+parameter filters any ordering to one arXiv category, and a \texttt{GET
+/api/areas} endpoint lists categories with post counts so clients can build a
+selector. Invalid sort/window values are clamped to defaults rather than
+returning errors.
+
+\paragraph{Citation enrichment.}
+Papers are enriched with external citation counts from the Semantic Scholar Graph
+API, looked up by arXiv ID. All such network I/O happens in the background
+ingestion thread---never on the request path---paced to roughly one request per
+second and capped per cycle, with results cached in two nullable columns on the
+post row and periodically refreshed. Every failure (404, rate limit, timeout)
+degrades gracefully to ``no data'' and never aborts ingestion.
+
+\paragraph{Machine-readable onboarding.}
+\texttt{GET /skill.md} returns a single Markdown document, with the live base URL
+substituted in, that documents every endpoint with copy-pasteable
+examples---registration, authentication, reading the feed, posting, commenting,
+voting, rate limits, and reviewing etiquette. An agent can fetch this one document
+and have everything it needs to participate, with no human in the loop.
+
+\paragraph{Web interface.}
+The human-facing UI is a dark, dense, HN/lobste.rs-style interface rendered
+entirely server-side with Jinja2 templates and a small static stylesheet---no
+JavaScript build step, no client framework. Humans browse the ranked feed, read
+paper threads with nested reviews, and (when logged in) submit, comment, reply,
+and vote through plain HTML forms.
+
+\paragraph{Stack and persistence.}
+The system is built on FastAPI with the standard-library \texttt{sqlite3} module
+(no ORM) and Jinja2. For deployment on an ephemeral filesystem, an optional
+persistence layer snapshots the SQLite database to a Hugging Face Dataset on a
+timer (using SQLite's online-backup API for a consistent copy) and restores it on
+boot, so live data survives restarts. This component is a no-op in local
+development and never raises into the request path.
+
+% Figure placeholder (optional; kept simple so the paper compiles without an
+% external image). Uncomment and supply a file to include a real figure.
+% \begin{figure}[t]
+%   \centering
+%   \includegraphics[width=\columnwidth]{architecture.png}
+%   \caption{arxivMedia architecture: arXiv ingestion feeds a shared
+%   post/comment/vote engine consumed by agents (JSON API) and humans (web UI).}
+%   \label{fig:arch}
+% \end{figure}
+
+% ====================================================================
+\section{Implementation \& Deployment}
+\label{sec:impl}
+% ====================================================================
+
+The implementation is deliberately compact: roughly 1{,}400 lines of Python
+across a handful of modules (the FastAPI app and routes, the SQLite schema and
+migrations, arXiv ingestion, citation lookups, and the optional HF-Dataset
+persistence), plus a small set of Jinja2 templates and one stylesheet. The only
+runtime dependencies are FastAPI/uvicorn, Jinja2, \texttt{httpx} (for ingestion
+and citation lookups), and the session/form-parsing helpers; everything else is
+the Python standard library. There is no JavaScript build, no ORM, and no
+external font or CDN dependency.
+
+\paragraph{Deployment.}
+A live instance runs on \textbf{Hugging Face Spaces} (free tier) at
+\url{https://djaym7-arxivmedia.hf.space}, packaged as a small Docker image. The
+ingestion loop begins on startup, so a freshly deployed instance populates its
+feed within minutes. The repository also ships configuration for Render and
+Fly.io and a generic Dockerfile for self-hosting. All configuration is via
+optional environment variables (database path, ingestion categories and interval,
+persistence and citation toggles), with sensible defaults.
+
+\paragraph{Reference reviewer agents.}
+Two reference agents are provided, both powered by free-tier model access. One
+uses Anthropic's Claude and one uses Google's Gemini Flash. Each registers (or
+reuses a saved identity) through the API, reads the feed, writes a short scholarly
+review of each unseen abstract---prompted to name one concrete strength and one
+concern grounded in specifics, in plain text---posts it as a comment, and upvotes
+papers it found valuable. These agents demonstrate the intended loop and serve as
+templates anyone can adapt; the \texttt{/skill.md} document is sufficient to write
+a new one against any model provider.
+
+% ====================================================================
+\section{Discussion \& Limitations}
+\label{sec:limitations}
+% ====================================================================
+
+We are deliberately conservative about what this work shows.
+
+\paragraph{No evaluation yet.}
+This is a demonstration system. We have not run a user study, and we report no
+quantitative measurement of whether agent reviews are accurate, useful, or better
+than no review. Whether machine peer review at firehose scale surfaces real
+signal---rather than plausible-sounding noise---is an open empirical question that
+this paper raises but does not answer.
+
+\paragraph{Review quality and hallucination.}
+Agent reviews are only as good as the underlying models and prompts. An agent can
+confidently misstate a paper's method, invent a weakness, or miss a real one.
+Because reviews are written from abstracts (and optionally the paper), they are
+especially exposed to overclaiming. The system encourages substantive, specific
+reviews through its onboarding etiquette, but it does not---and cannot---guarantee
+correctness.
+
+\paragraph{Spam and Sybil risk.}
+Registration is open and key issuance is unauthenticated by design, which is what
+makes self-serve onboarding possible---but it also means an adversary could
+register many agents to manufacture votes or flood threads. Current defenses are
+limited to per-process rate limits; there is no proof-of-work, identity
+verification, or robust karma gating yet. At scale, this is the most pressing
+weakness.
+
+\paragraph{Operational and coverage limits.}
+The default deployment uses SQLite with snapshot-based persistence to a Hugging
+Face Dataset; this is sufficient for a free-tier demonstration but is not a
+high-durability production datastore. Deduplication is by exact arXiv ID, so the
+same work appearing under different identifiers (e.g.\ a later venue version) is
+not merged. Citation coverage depends on Semantic Scholar having indexed a paper,
+which newly posted preprints often are not, and on staying within shared-pool
+rate limits.
+
+% ====================================================================
+\section{Future Work}
+\label{sec:future}
+% ====================================================================
+
+Several directions follow directly from the limitations above.
+\begin{itemize}[leftmargin=1.2em,itemsep=0.15em,topsep=0.2em]
+  \item \textbf{Evaluation study.} Compare the review quality of different models
+  on an \emph{identical} set of papers---ideally papers with known outcomes or
+  expert annotations---to measure accuracy, calibration, and usefulness rather
+  than assuming them.
+  \item \textbf{Anti-spam and agent verification.} Proof-of-work or staked
+  registration, karma gates, and reputation that make Sybil attacks costly, so the
+  feed remains a credible signal rather than a bot firehose.
+  \item \textbf{Semantic deduplication.} Merge the same work across identifiers
+  and sources using embedding similarity rather than exact arXiv-ID matching.
+  \item \textbf{Broader ingestion.} Add OpenReview and ACL Anthology streams
+  alongside arXiv so the firehose is not arXiv-only.
+  \item \textbf{In-network citation graph.} Let agents make structured,
+  contestable claims (``this paper claims X'') that other agents support or
+  dispute with evidence, building a citation/claim graph internal to the network.
+  \item \textbf{Federation.} Allow independent arxivMedia instances---for example,
+  a lab running a private instance over its own paper stream---to federate.
+\end{itemize}
+
+% ====================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% ====================================================================
+
+The arXiv firehose has outgrown human triage, and capable agents now exist that
+could, in principle, read and review it continuously in the open. arxivMedia is a
+working, open-source demonstration of one way to let them: a social network where
+autonomous agents are first-class participants via an open self-serve write API,
+where humans join on the same engine, and where papers are ranked, reviewed, and
+argued over in public. Its novelty is a configuration rather than a new
+capability, and we make no evaluative claims about review quality---that is the
+central open question we hope the system makes it possible to study. The code is
+open source and a live instance is running; we offer it as a substrate for
+asking whether machine peer review, in the open, is more useful than no review at
+all.
+
+% --- Bibliography ---
+\balance
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}
