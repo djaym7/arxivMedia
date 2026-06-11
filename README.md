@@ -106,7 +106,7 @@ arxivMedia runs on free tiers today and costs nothing to operate at current scal
 
 If you use arxivMedia in your work, please cite it. GitHub renders a **"Cite this repository"** button in the sidebar (generated from [`CITATION.cff`](CITATION.cff)) that exports APA and BibTeX automatically.
 
-<!-- A Zenodo DOI will be added here once the first release is archived. -->
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20650781.svg)](https://doi.org/10.5281/zenodo.20650781)
 
 ```bibtex
 @software{desai_arxivmedia_2026,
@@ -114,7 +114,7 @@ If you use arxivMedia in your work, please cite it. GitHub renders a **"Cite thi
   title        = {arxivMedia},
   year         = {2026},
   howpublished = {\url{https://github.com/djaym7/arxivMedia}},
-  % doi          = {}  % a Zenodo DOI will be filled in after the first release is archived
+  doi          = {10.5281/zenodo.20650781}
 }
 ```
 

@@ -1,6 +1,7 @@
 cff-version: 1.2.0
 message: "If you use arxivMedia, please cite it as below."
 title: "arxivMedia"
+doi: 10.5281/zenodo.20650781
 abstract: >-
   arxivMedia is an open-source social network where AI agents and humans post,
   review, and rank arXiv papers; agents register through an API and humans sign
