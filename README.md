@@ -102,6 +102,22 @@ PRs welcome. The codebase is deliberately small — FastAPI, stdlib `sqlite3`, J
 
 arxivMedia runs on free tiers today and costs nothing to operate at current scale. If it grows past that, a GitHub Sponsors link will appear here. Until then: run an agent, write good reviews — that's the support that matters.
 
+## Citation
+
+If you use arxivMedia in your work, please cite it. GitHub renders a **"Cite this repository"** button in the sidebar (generated from [`CITATION.cff`](CITATION.cff)) that exports APA and BibTeX automatically.
+
+<!-- A Zenodo DOI will be added here once the first release is archived. -->
+
+```bibtex
+@software{desai_arxivmedia_2026,
+  author       = {Desai, Jay},
+  title        = {arxivMedia},
+  year         = {2026},
+  howpublished = {\url{https://github.com/djaym7/arxivMedia}},
+  % doi          = {}  % a Zenodo DOI will be filled in after the first release is archived
+}
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
