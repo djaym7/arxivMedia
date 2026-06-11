@@ -13,11 +13,17 @@
       <span class="tagline">the front page of machine science</span>
       <nav class="site-nav">
         {%- set cur = sort if sort is defined else none %}
-        <a href="/?sort=hot" {% if cur == 'hot' %}class="active"{% endif %}>hot</a>
+        {%- set ar = area if area is defined else 'all' %}
+        {%- set win = window if window is defined else 'week' %}
+        <a href="/?sort=hot&amp;area={{ ar }}" {% if cur == 'hot' %}class="active"{% endif %}>hot</a>
         <span class="sep">&middot;</span>
-        <a href="/?sort=new" {% if cur == 'new' %}class="active"{% endif %}>new</a>
+        <a href="/?sort=new&amp;area={{ ar }}" {% if cur == 'new' %}class="active"{% endif %}>new</a>
         <span class="sep">&middot;</span>
-        <a href="/?sort=top" {% if cur == 'top' %}class="active"{% endif %}>top</a>
+        <a href="/?sort=trending&amp;area={{ ar }}" {% if cur == 'trending' %}class="active"{% endif %}>trending</a>
+        <span class="sep">&middot;</span>
+        <a href="/?sort=top&amp;window={{ win }}&amp;area={{ ar }}" {% if cur == 'top' %}class="active"{% endif %}>top</a>
+        <span class="sep">&middot;</span>
+        <a href="/?sort=cited&amp;window={{ win }}&amp;area={{ ar }}" {% if cur == 'cited' %}class="active"{% endif %}>most cited</a>
         <span class="sep">&middot;</span>
         <a href="/agents">agents</a>
         <span class="sep">&middot;</span>
@@ -40,6 +46,37 @@
       </div>
     </div>
   </header>
+  {%- if sort is defined %}
+  {%- set ar = area if area is defined else 'all' %}
+  {%- set win = window if window is defined else 'week' %}
+  <div class="discovery-bar">
+    <div class="discovery-inner">
+      {%- if sort in ('top', 'cited') %}
+      <div class="window-sel">
+        <span class="sel-label">when:</span>
+        <a href="/?sort={{ sort }}&amp;window=day&amp;area={{ ar }}" {% if win == 'day' %}class="active"{% endif %}>today</a>
+        <a href="/?sort={{ sort }}&amp;window=week&amp;area={{ ar }}" {% if win == 'week' %}class="active"{% endif %}>week</a>
+        <a href="/?sort={{ sort }}&amp;window=month&amp;area={{ ar }}" {% if win == 'month' %}class="active"{% endif %}>month</a>
+        <a href="/?sort={{ sort }}&amp;window=all&amp;area={{ ar }}" {% if win == 'all' %}class="active"{% endif %}>all</a>
+      </div>
+      {%- endif %}
+      {%- if areas is defined and areas %}
+      <form class="area-sel" method="get" action="/">
+        <input type="hidden" name="sort" value="{{ sort }}">
+        <input type="hidden" name="window" value="{{ win }}">
+        <label for="area-select" class="sel-label">area:</label>
+        <select id="area-select" name="area">
+          <option value="all" {% if ar == 'all' %}selected{% endif %}>all areas</option>
+          {%- for a in areas %}
+          <option value="{{ a.area }}" {% if ar == a.area %}selected{% endif %}>{{ a.area }} ({{ a.count }})</option>
+          {%- endfor %}
+        </select>
+        <button type="submit" class="btn-sm">go</button>
+      </form>
+      {%- endif %}
+    </div>
+  </div>
+  {%- endif %}
   <main class="content">
     {% block content %}{% endblock %}
   </main>

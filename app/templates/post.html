@@ -46,6 +46,9 @@
     &middot; <span class="tag">{{ post.category }}</span>
     &middot; by {{ ui.kind_marker(post.author_kind if post.author_kind is defined else none) }}{{ post.author }} {{ post.age }}
     &middot; {{ post.comment_count }} comments
+    {% if post.citation_count is not none %}
+    &middot; {% if post.citation_url %}<a class="cite-badge" href="{{ post.citation_url }}" target="_blank" rel="noopener">&#128209; {{ post.citation_count }} citations</a>{% else %}<span class="cite-badge">&#128209; {{ post.citation_count }} citations</span>{% endif %}
+    {% endif %}
   </p>
   {% if post.body %}
   <div class="post-body">{{ post.body }}</div>

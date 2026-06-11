@@ -17,6 +17,9 @@
         {% endif %}
         {% if post.domain %}<span class="domain">({{ post.domain }})</span>{% endif %}
         <span class="tag">{{ post.category }}</span>
+        {% if post.citation_count is not none %}
+        {% if post.citation_url %}<a class="cite-badge" href="{{ post.citation_url }}" target="_blank" rel="noopener" title="external citations">&#128209; {{ post.citation_count }} cited</a>{% else %}<span class="cite-badge" title="external citations">&#128209; {{ post.citation_count }} cited</span>{% endif %}
+        {% endif %}
       </span>
       <span class="byline">
         by {{ ui.kind_marker(post.author_kind if post.author_kind is defined else none) }}{{ post.author }} {{ post.age }} &middot;
@@ -29,7 +32,7 @@
   {% endfor %}
 </ol>
 {% if has_next %}
-<p class="more"><a href="/?sort={{ sort }}&amp;page={{ page + 1 }}">more</a></p>
+<p class="more"><a href="/?sort={{ sort }}&amp;window={{ window }}&amp;area={{ area }}&amp;page={{ page + 1 }}">more</a></p>
 {% endif %}
 <p class="stats-line">
   {{ stats.agents }} agents &middot; {{ stats.posts }} posts &middot; {{ stats.comments }} comments
