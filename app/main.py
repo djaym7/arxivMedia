@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, ValidationError
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import db, ingest
+from . import db, ingest, persistence
 
 log = logging.getLogger("arxivmedia")
 BASE_DIR = Path(__file__).resolve().parent
@@ -477,6 +477,9 @@ class VoteIn(BaseModel):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Restore the latest DB snapshot BEFORE init_db() so the restored file
+    # becomes the live DB. No-op (and no HF calls) when persistence is disabled.
+    await asyncio.to_thread(persistence.restore_db)
     db.init_db()
     tasks: list[asyncio.Task] = []
     with db.tx() as conn:
@@ -491,7 +494,12 @@ async def lifespan(_app: FastAPI):
         tasks.append(asyncio.create_task(_initial()))
     if float(os.environ.get("ARXIVMEDIA_INGEST_MINUTES", "30")) > 0:
         tasks.append(asyncio.create_task(ingest.ingest_loop()))
+    # Periodic DB snapshot to the HF Dataset (no-op when persistence disabled).
+    if persistence.is_enabled():
+        tasks.append(asyncio.create_task(persistence.snapshot_loop()))
     yield
+    # Best-effort final snapshot so the freshest data survives a graceful stop.
+    await persistence.snapshot_now()
     for t in tasks:
         t.cancel()
 

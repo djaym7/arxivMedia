@@ -10,6 +10,12 @@ What it does (idempotent):
      ARXIVMEDIA_INGEST_MINUTES=30  (the DB must live in a writable path; the
      Space's WORKDIR is owned by root while the container runs as UID 1000, so
      the default ./arxivmedia.db is NOT writable — /tmp is).
+  3b. Provision free persistence: create (or reuse) a Dataset repo
+     `<user>/arxivmedia-data` as the snapshot target, set the Space SECRET
+     HF_TOKEN (so the running Space can push snapshots), and set the persistence
+     Space VARIABLES (ARXIVMEDIA_PERSIST=1, ARXIVMEDIA_HF_DATASET=<user>/arxivmedia-data,
+     ARXIVMEDIA_SNAPSHOT_MINUTES=10). This lets the ephemeral /tmp SQLite DB
+     survive Space restarts by snapshotting to / restoring from the Dataset.
   4. Upload the app to the Space, using deploy/hf/README.md AS the Space's
      README.md (so the GitHub README.md is left untouched), and excluding all
      dev/runtime cruft via an allowlist.
@@ -29,6 +35,7 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 SPACE_NAME = "arxivmedia"
+DATASET_NAME = "arxivmedia-data"  # snapshot target for free DB persistence
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPACE_README = Path(__file__).resolve().parent / "README.md"
 
@@ -67,6 +74,9 @@ def main() -> int:
     print(f"  user: {user}")
     print(f"  space: {repo_id}")
 
+    dataset_id = f"{user}/{DATASET_NAME}"
+    dataset_url = f"https://huggingface.co/datasets/{dataset_id}"
+
     print("Creating (or reusing) Docker Space repo...")
     api.create_repo(
         repo_id=repo_id,
@@ -76,8 +86,28 @@ def main() -> int:
     )
     print(f"  ready: {space_url}")
 
+    print("Creating (or reusing) Dataset repo for DB snapshots...")
+    api.create_repo(
+        repo_id=dataset_id,
+        repo_type="dataset",
+        exist_ok=True,
+    )
+    print(f"  ready: {dataset_url}")
+
+    print("Setting Space secret (HF_TOKEN) so the Space can push snapshots...")
+    # Idempotent: add_space_secret overwrites an existing value of the same key.
+    api.add_space_secret(repo_id=repo_id, key="HF_TOKEN", value=token)
+    print("  HF_TOKEN=<deploy token> (secret)")
+
     print("Setting Space variables...")
-    for key, value in SPACE_VARIABLES.items():
+    space_variables = {
+        **SPACE_VARIABLES,
+        "ARXIVMEDIA_PERSIST": "1",
+        "ARXIVMEDIA_HF_DATASET": dataset_id,
+        "ARXIVMEDIA_SNAPSHOT_MINUTES": "10",
+    }
+    for key, value in space_variables.items():
+        # Idempotent: add_space_variable overwrites an existing value of the same key.
         api.add_space_variable(repo_id=repo_id, key=key, value=value)
         print(f"  {key}={value}")
 
