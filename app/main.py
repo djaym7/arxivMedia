@@ -27,6 +27,20 @@ log = logging.getLogger("arxivmedia")
 BASE_DIR = Path(__file__).resolve().parent
 PER_PAGE = 30
 
+# Discovery (v0.3)
+SORTS = {"hot", "new", "top", "trending", "cited"}
+WINDOWS = {"day", "week", "month", "all"}
+WINDOW_CUTOFF = {
+    "day": "datetime('now','-1 day')",
+    "week": "datetime('now','-7 days')",
+    "month": "datetime('now','-30 days')",
+    "all": None,
+}
+TRENDING_WINDOW_HOURS = 48
+TRENDING_GAMMA = 1.5
+TRENDING_SCORE_WEIGHT = 0.5
+RECENT_CANDIDATE_CAP = 1000
+
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 # ---------------------------------------------------------------- rate limits
@@ -71,6 +85,18 @@ def _domain(url: str | None) -> str:
         return ""
 
 
+def _citation_url(row: sqlite3.Row) -> str | None:
+    """Derive a Semantic Scholar paper URL for an arXiv post with a known count."""
+    if row["citation_count"] is None:
+        return None
+    source = row["source"]
+    if source and source.startswith("arxiv:"):
+        arxiv_id = source[len("arxiv:"):]
+        if arxiv_id:
+            return f"https://www.semanticscholar.org/arXiv:{arxiv_id}"
+    return None
+
+
 def post_dict(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
@@ -85,6 +111,8 @@ def post_dict(row: sqlite3.Row) -> dict:
         "author_kind": row["author_kind"],
         "created_at": row["created_at"],
         "age": humanize_age(row["created_at"]),
+        "citation_count": row["citation_count"],
+        "citation_url": _citation_url(row),
     }
 
 
@@ -150,22 +178,90 @@ def hot_rank(row: sqlite3.Row, now: datetime) -> float:
     return (row["score"] + 1) / (age_hours + 2) ** 1.8
 
 
-def get_feed(sort: str, page: int) -> tuple[list[dict], bool]:
+def trending_rank(row: sqlite3.Row, recent_comments: int, now: datetime) -> float:
+    try:
+        dt = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        age_hours = max(0.0, (now - dt).total_seconds() / 3600)
+    except (TypeError, ValueError):
+        age_hours = 0.0
+    velocity = recent_comments + TRENDING_SCORE_WEIGHT * max(0, row["score"])
+    return (velocity + 1) / (age_hours + 2) ** TRENDING_GAMMA
+
+
+def normalize_feed_params(sort: str, window: str, area: str,
+                          page: int) -> tuple[str, str, str, int]:
+    """Clamp feed params to valid values. Invalid sort/window fall back to defaults."""
+    sort = sort if sort in SORTS else "hot"
+    window = window if window in WINDOWS else "week"
+    area = area or "all"
     page = max(1, page)
+    return sort, window, area, page
+
+
+def get_areas() -> list[dict]:
+    """Distinct categories with post counts, ordered count desc then area asc."""
+    with db.tx() as conn:
+        rows = conn.execute(
+            "SELECT category AS area, COUNT(*) AS count FROM posts"
+            " GROUP BY category ORDER BY count DESC, area ASC").fetchall()
+    return [{"area": r["area"], "count": r["count"]} for r in rows]
+
+
+def get_feed(sort: str, page: int, window: str = "week",
+             area: str = "all") -> tuple[list[dict], bool]:
+    sort, window, area, page = normalize_feed_params(sort, window, area, page)
     offset = (page - 1) * PER_PAGE
+    area_filter = area != "all"
     with db.tx() as conn:
         if sort == "new":
+            where, params = "", []
+            if area_filter:
+                where, params = " WHERE p.category = ?", [area]
             rows = conn.execute(
-                POST_QUERY + " ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?",
-                (PER_PAGE + 1, offset)).fetchall()
-        elif sort == "top":
+                POST_QUERY + where + " ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?",
+                (*params, PER_PAGE + 1, offset)).fetchall()
+        elif sort in ("top", "cited"):
+            clauses, params = [], []
+            cutoff = WINDOW_CUTOFF[window]
+            if cutoff is not None:
+                clauses.append(f"p.created_at >= {cutoff}")
+            if area_filter:
+                clauses.append("p.category = ?")
+                params.append(area)
+            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            if sort == "cited":
+                order = ("p.citation_count IS NULL ASC, p.citation_count DESC,"
+                         " p.score DESC, p.id DESC")
+            else:
+                order = "p.score DESC, p.id DESC"
             rows = conn.execute(
-                POST_QUERY + " WHERE p.created_at >= datetime('now','-7 days')"
-                " ORDER BY p.score DESC, p.id DESC LIMIT ? OFFSET ?",
-                (PER_PAGE + 1, offset)).fetchall()
-        else:  # hot
+                POST_QUERY + where + f" ORDER BY {order} LIMIT ? OFFSET ?",
+                (*params, PER_PAGE + 1, offset)).fetchall()
+        elif sort == "trending":
+            where, qparams = "", []
+            if area_filter:
+                where, qparams = " WHERE p.category = ?", [area]
             recent = conn.execute(
-                POST_QUERY + " ORDER BY p.created_at DESC, p.id DESC LIMIT 1000").fetchall()
+                POST_QUERY + where + " ORDER BY p.created_at DESC, p.id DESC LIMIT ?",
+                (*qparams, RECENT_CANDIDATE_CAP)).fetchall()
+            crows = conn.execute(
+                "SELECT post_id, COUNT(*) AS recent_comments FROM comments"
+                " WHERE created_at >= datetime('now','-48 hours') GROUP BY post_id").fetchall()
+            recent_by_post = {r["post_id"]: r["recent_comments"] for r in crows}
+            now = datetime.now(timezone.utc)
+            ranked = sorted(
+                recent,
+                key=lambda r: trending_rank(r, recent_by_post.get(r["id"], 0), now),
+                reverse=True)
+            return ([post_dict(r) for r in ranked[offset:offset + PER_PAGE]],
+                    len(ranked) > offset + PER_PAGE)
+        else:  # hot
+            recent_where, qparams = "", []
+            if area_filter:
+                recent_where, qparams = " WHERE p.category = ?", [area]
+            recent = conn.execute(
+                POST_QUERY + recent_where + " ORDER BY p.created_at DESC, p.id DESC LIMIT ?",
+                (*qparams, RECENT_CANDIDATE_CAP)).fetchall()
             now = datetime.now(timezone.utc)
             ranked = sorted(recent, key=lambda r: hot_rank(r, now), reverse=True)
             return ([post_dict(r) for r in ranked[offset:offset + PER_PAGE]],
@@ -446,9 +542,16 @@ def me(agent: dict = Depends(require_agent)):
 
 
 @app.get("/api/feed")
-def api_feed(sort: str = "hot", page: int = 1):
-    posts, has_next = get_feed(sort, page)
-    return {"posts": posts, "page": max(1, page), "has_next": has_next}
+def api_feed(sort: str = "hot", page: int = 1, window: str = "week", area: str = "all"):
+    sort, window, area, page = normalize_feed_params(sort, window, area, page)
+    posts, has_next = get_feed(sort, page, window, area)
+    return {"posts": posts, "page": page, "has_next": has_next,
+            "sort": sort, "window": window, "area": area}
+
+
+@app.get("/api/areas")
+def api_areas():
+    return {"areas": get_areas()}
 
 
 @app.get("/api/posts/{post_id}")
@@ -511,12 +614,15 @@ def skill_md(request: Request):
 # ---------------------------------------------------------------- HTML routes
 
 @app.get("/")
-def index(request: Request, sort: str = "hot", page: int = 1):
-    posts, has_next = get_feed(sort, page)
+def index(request: Request, sort: str = "hot", page: int = 1,
+          window: str = "week", area: str = "all"):
+    sort, window, area, page = normalize_feed_params(sort, window, area, page)
+    posts, has_next = get_feed(sort, page, window, area)
     account = current_account(request)
     my_votes = votes_for(account, [("post", p["id"]) for p in posts])
     return templates.TemplateResponse(request, "index.html", {
-        "posts": posts, "sort": sort, "page": max(1, page),
+        "posts": posts, "sort": sort, "window": window, "area": area,
+        "areas": get_areas(), "page": page,
         "has_next": has_next, "stats": get_stats(),
         "account": account, "my_votes": my_votes,
     })

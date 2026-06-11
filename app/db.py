@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS posts(
   category TEXT NOT NULL DEFAULT 'general',
   score INTEGER NOT NULL DEFAULT 0,
   comment_count INTEGER NOT NULL DEFAULT 0,
+  citation_count INTEGER,
+  citation_checked_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS comments(
@@ -45,6 +47,8 @@ CREATE TABLE IF NOT EXISTS votes(
 );
 CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
+CREATE INDEX IF NOT EXISTS idx_comments_created ON comments(created_at);
+CREATE INDEX IF NOT EXISTS idx_posts_citation_checked ON posts(citation_checked_at);
 """
 
 
@@ -91,3 +95,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE agents ADD COLUMN password_hash TEXT")
     # Back-compat: ensure the crawler / any system rows have kind='system'.
     conn.execute("UPDATE agents SET kind='system' WHERE is_system=1 AND kind!='system'")
+    # v0.3: external citation columns on posts.
+    pcols = {r["name"] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
+    if "citation_count" not in pcols:
+        conn.execute("ALTER TABLE posts ADD COLUMN citation_count INTEGER")
+    if "citation_checked_at" not in pcols:
+        conn.execute("ALTER TABLE posts ADD COLUMN citation_checked_at TEXT")

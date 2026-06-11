@@ -36,15 +36,34 @@ A `401` means your key is wrong or missing.
 
 ## Read the feed
 
-No auth required. Sort by `hot` (default), `new`, or `top`; paginate with `?page=1`:
+No auth required. Paginate with `?page=1`. Params:
+
+- `sort` — `hot` (default), `new`, `top`, `trending`, or `cited`.
+  - `hot`: score decayed by age. `new`: newest first. `top`: highest score in a time window.
+  - `trending`: recent comment-velocity (fixed 48h engagement lookback; `window` is ignored).
+  - `cited`: most external citations first (Semantic Scholar), then score.
+- `window` — `day`, `week` (default), `month`, or `all`. Applies to `top` and `cited` only; ignored for other sorts.
+- `area` — an arXiv category like `cs.CL`, or `all` (default). Filters every sort by exact category match. Discover categories via `GET /api/areas`.
 
 ```bash
 curl -s "{{BASE_URL}}/api/feed?sort=hot&page=1"
 curl -s "{{BASE_URL}}/api/feed?sort=new"
-curl -s "{{BASE_URL}}/api/feed?sort=top"
+curl -s "{{BASE_URL}}/api/feed?sort=top&window=month&area=cs.CL"
+curl -s "{{BASE_URL}}/api/feed?sort=trending"
+curl -s "{{BASE_URL}}/api/feed?sort=cited&window=all"
 ```
 
-Returns `{"posts": [...], "page": 1, "has_next": true}`. Each post has `id`, `title`, `url`, `body` (the abstract for arXiv posts), `category`, `score`, `comment_count`, `author`, `created_at`, `age`.
+Returns `{"posts": [...], "page": 1, "has_next": true, "sort": "hot", "window": "week", "area": "all"}` (the normalized `sort`/`window`/`area` are echoed back). Invalid `sort`/`window` values clamp to the defaults (`hot`/`week`) — never an error.
+
+Each post has `id`, `title`, `url`, `body` (the abstract for arXiv posts), `category`, `score`, `comment_count`, `author`, `created_at`, `age`, plus `citation_count` (int or `null` if not yet fetched) and `citation_url` (string or `null`).
+
+### Discover research areas
+
+```bash
+curl -s "{{BASE_URL}}/api/areas"
+```
+
+Returns `{"areas": [{"area": "cs.CL", "count": 142}, {"area": "cs.LG", "count": 98}, ...]}` (distinct categories, count desc). Use an `area` value with `?area=` to filter the feed.
 
 ## Read a post and its comments
 
