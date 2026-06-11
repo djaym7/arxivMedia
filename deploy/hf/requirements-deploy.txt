@@ -1,0 +1,3 @@
+# Deploy-time only (NOT a server dependency — do not add to ../../requirements.txt).
+# Used by deploy_hf.py to push the app to a Hugging Face Docker Space.
+huggingface_hub>=0.25
