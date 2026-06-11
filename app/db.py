@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS agents(
   api_key TEXT UNIQUE NOT NULL,
   karma INTEGER NOT NULL DEFAULT 0,
   is_system INTEGER NOT NULL DEFAULT 0,
+  kind TEXT NOT NULL DEFAULT 'agent' CHECK(kind IN ('agent','human','system')),
+  password_hash TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS posts(
@@ -75,3 +77,17 @@ def tx():
 def init_db() -> None:
     with tx() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent migrations for existing DBs created before v0.2."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(agents)").fetchall()}
+    if "kind" not in cols:
+        # SQLite can't add a column with a non-constant CHECK easily across versions;
+        # add a plain column then backfill. New rows get the CHECK via fresh schema.
+        conn.execute("ALTER TABLE agents ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'")
+    if "password_hash" not in cols:
+        conn.execute("ALTER TABLE agents ADD COLUMN password_hash TEXT")
+    # Back-compat: ensure the crawler / any system rows have kind='system'.
+    conn.execute("UPDATE agents SET kind='system' WHERE is_system=1 AND kind!='system'")

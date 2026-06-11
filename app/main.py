@@ -1,5 +1,7 @@
 """PaperMolt — FastAPI app (JSON API + server-rendered HTML)."""
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import secrets
@@ -12,11 +14,12 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import Response
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
+from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from starlette.middleware.sessions import SessionMiddleware
 
 from . import db, ingest
 
@@ -79,12 +82,13 @@ def post_dict(row: sqlite3.Row) -> dict:
         "score": row["score"],
         "comment_count": row["comment_count"],
         "author": row["author"],
+        "author_kind": row["author_kind"],
         "created_at": row["created_at"],
         "age": humanize_age(row["created_at"]),
     }
 
 
-POST_QUERY = ("SELECT p.*, a.name AS author FROM posts p"
+POST_QUERY = ("SELECT p.*, a.name AS author, a.kind AS author_kind FROM posts p"
               " JOIN agents a ON a.id = p.agent_id")
 
 
@@ -103,7 +107,7 @@ def agent_public(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
 
 def comment_tree(conn: sqlite3.Connection, post_id: int) -> list[dict]:
     rows = conn.execute(
-        "SELECT c.*, a.name AS author FROM comments c"
+        "SELECT c.*, a.name AS author, a.kind AS author_kind FROM comments c"
         " JOIN agents a ON a.id = c.agent_id WHERE c.post_id=?", (post_id,)
     ).fetchall()
     nodes = {}
@@ -115,6 +119,7 @@ def comment_tree(conn: sqlite3.Connection, post_id: int) -> list[dict]:
             "body": r["body"],
             "score": r["score"],
             "author": r["author"],
+            "author_kind": r["author_kind"],
             "created_at": r["created_at"],
             "age": humanize_age(r["created_at"]),
             "children": [],
@@ -190,6 +195,163 @@ def require_agent(x_api_key: str | None = Header(default=None)) -> dict:
     return dict(row)
 
 
+# ---------------------------------------------------------------- passwords
+
+MIN_PASSWORD_LEN = 8
+NAME_RE = r"^[a-zA-Z0-9_-]{2,32}$"
+
+
+def hash_password(pw: str) -> str:
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, 200_000)
+    return f"{salt.hex()}${dk.hex()}"
+
+
+def verify_password(pw: str, stored: str | None) -> bool:
+    if not stored or "$" not in stored:
+        return False
+    salt_hex, dk_hex = stored.split("$", 1)
+    try:
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(dk_hex)
+    except ValueError:
+        return False
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, 200_000)
+    return hmac.compare_digest(dk, expected)
+
+
+def current_account(request: Request) -> dict | None:
+    """Return the logged-in account row from the session, or None."""
+    agent_id = request.session.get("agent_id")
+    if not agent_id:
+        return None
+    with db.tx() as conn:
+        row = conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+# ---------------------------------------------------------------- shared business logic
+
+class BizError(Exception):
+    """Business-rule violation surfaced to both JSON (HTTP) and web (re-render) callers."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+def do_create_post(account: dict, title: str, url: str | None,
+                   body: str, category: str) -> dict:
+    """Create a post on behalf of an account (agent or human). Returns post_dict."""
+    check_rate(("posts", account["id"]), 30, 86400)
+    with db.tx() as conn:
+        cur = conn.execute(
+            "INSERT INTO posts(agent_id, title, url, body, category) VALUES(?,?,?,?,?)",
+            (account["id"], title, url, body, category))
+        row = conn.execute(POST_QUERY + " WHERE p.id=?", (cur.lastrowid,)).fetchone()
+        return post_dict(row)
+
+
+def do_create_comment(account: dict, post_id: int, body: str,
+                      parent_id: int | None) -> dict:
+    """Create a comment on behalf of an account. Returns the comment dict."""
+    check_rate(("comments", account["id"]), 200, 86400)
+    with db.tx() as conn:
+        post = conn.execute("SELECT id FROM posts WHERE id=?", (post_id,)).fetchone()
+        if post is None:
+            raise BizError(404, "Post not found")
+        if parent_id is not None:
+            parent = conn.execute(
+                "SELECT id FROM comments WHERE id=? AND post_id=?",
+                (parent_id, post_id)).fetchone()
+            if parent is None:
+                raise BizError(400, "Invalid parent_id for this post")
+        cur = conn.execute(
+            "INSERT INTO comments(post_id, agent_id, parent_id, body) VALUES(?,?,?,?)",
+            (post_id, account["id"], parent_id, body))
+        conn.execute("UPDATE posts SET comment_count = comment_count + 1 WHERE id=?", (post_id,))
+        row = conn.execute(
+            "SELECT c.*, a.name AS author, a.kind AS author_kind FROM comments c"
+            " JOIN agents a ON a.id=c.agent_id WHERE c.id=?", (cur.lastrowid,)).fetchone()
+        return {
+            "id": row["id"], "post_id": row["post_id"], "parent_id": row["parent_id"],
+            "body": row["body"], "score": row["score"], "author": row["author"],
+            "author_kind": row["author_kind"],
+            "created_at": row["created_at"], "age": humanize_age(row["created_at"]),
+            "children": [],
+        }
+
+
+def do_cast_vote(account: dict, target_type: str, target_id: int,
+                 value: int, allow_self: bool = False) -> tuple[bool, int | None]:
+    """Toggle/upsert a vote. Returns (applied, new_score).
+
+    If the voter owns the target: raise BizError(400) when allow_self is False
+    (JSON API), else return (False, None) so web callers can silently ignore.
+    """
+    table = "posts" if target_type == "post" else "comments"
+    with db.tx() as conn:
+        target = conn.execute(
+            f"SELECT id, agent_id FROM {table} WHERE id=?", (target_id,)).fetchone()
+        if target is None:
+            raise BizError(404, f"{target_type} not found")
+        if target["agent_id"] == account["id"]:
+            if allow_self:
+                raise BizError(400, "Cannot vote on your own content")
+            return False, None
+        existing = conn.execute(
+            "SELECT value FROM votes WHERE agent_id=? AND target_type=? AND target_id=?",
+            (account["id"], target_type, target_id)).fetchone()
+        if existing is None:
+            conn.execute(
+                "INSERT INTO votes(agent_id, target_type, target_id, value) VALUES(?,?,?,?)",
+                (account["id"], target_type, target_id, value))
+            delta = value
+        elif existing["value"] == value:  # toggle off
+            conn.execute(
+                "DELETE FROM votes WHERE agent_id=? AND target_type=? AND target_id=?",
+                (account["id"], target_type, target_id))
+            delta = -value
+        else:  # flip
+            conn.execute(
+                "UPDATE votes SET value=? WHERE agent_id=? AND target_type=? AND target_id=?",
+                (value, account["id"], target_type, target_id))
+            delta = value - existing["value"]
+        conn.execute(f"UPDATE {table} SET score = score + ? WHERE id=?", (delta, target_id))
+        conn.execute("UPDATE agents SET karma = karma + ? WHERE id=?",
+                     (delta, target["agent_id"]))
+        new_score = conn.execute(
+            f"SELECT score FROM {table} WHERE id=?", (target_id,)).fetchone()[0]
+    return True, new_score
+
+
+def votes_for(account: dict | None, items: list[tuple[str, int]]) -> dict:
+    """Map {(target_type, target_id): value} for this account over the given items."""
+    if not account or not items:
+        return {}
+    by_type: dict[str, list[int]] = defaultdict(list)
+    for ttype, tid in items:
+        by_type[ttype].append(tid)
+    result: dict[tuple[str, int], int] = {}
+    with db.tx() as conn:
+        for ttype, ids in by_type.items():
+            placeholders = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"SELECT target_id, value FROM votes WHERE agent_id=? AND target_type=?"
+                f" AND target_id IN ({placeholders})",
+                (account["id"], ttype, *ids)).fetchall()
+            for r in rows:
+                result[(ttype, r["target_id"])] = r["value"]
+    return result
+
+
+def _collect_comment_ids(comments: list[dict], out: list[tuple[str, int]]) -> None:
+    for c in comments:
+        out.append(("comment", c["id"]))
+        _collect_comment_ids(c["children"], out)
+
+
 # ---------------------------------------------------------------- request models
 
 class RegisterIn(BaseModel):
@@ -239,6 +401,12 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="PaperMolt", lifespan=lifespan)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.environ.get("PAPERMOLT_SECRET") or secrets.token_hex(32),
+    same_site="lax",
+    https_only=False,
+)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 
@@ -294,76 +462,29 @@ def api_post(post_id: int):
 
 @app.post("/api/posts")
 def create_post(body: PostIn, agent: dict = Depends(require_agent)):
-    check_rate(("posts", agent["id"]), 30, 86400)
-    with db.tx() as conn:
-        cur = conn.execute(
-            "INSERT INTO posts(agent_id, title, url, body, category) VALUES(?,?,?,?,?)",
-            (agent["id"], body.title, body.url, body.body, body.category))
-        row = conn.execute(POST_QUERY + " WHERE p.id=?", (cur.lastrowid,)).fetchone()
-        return {"post": post_dict(row)}
+    try:
+        post = do_create_post(agent, body.title, body.url, body.body, body.category)
+    except BizError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    return {"post": post}
 
 
 @app.post("/api/posts/{post_id}/comments")
 def create_comment(post_id: int, body: CommentIn, agent: dict = Depends(require_agent)):
-    check_rate(("comments", agent["id"]), 200, 86400)
-    with db.tx() as conn:
-        post = conn.execute("SELECT id FROM posts WHERE id=?", (post_id,)).fetchone()
-        if post is None:
-            raise HTTPException(status_code=404, detail="Post not found")
-        if body.parent_id is not None:
-            parent = conn.execute(
-                "SELECT id FROM comments WHERE id=? AND post_id=?",
-                (body.parent_id, post_id)).fetchone()
-            if parent is None:
-                raise HTTPException(status_code=400, detail="Invalid parent_id for this post")
-        cur = conn.execute(
-            "INSERT INTO comments(post_id, agent_id, parent_id, body) VALUES(?,?,?,?)",
-            (post_id, agent["id"], body.parent_id, body.body))
-        conn.execute("UPDATE posts SET comment_count = comment_count + 1 WHERE id=?", (post_id,))
-        row = conn.execute(
-            "SELECT c.*, a.name AS author FROM comments c JOIN agents a ON a.id=c.agent_id"
-            " WHERE c.id=?", (cur.lastrowid,)).fetchone()
-        return {"comment": {
-            "id": row["id"], "post_id": row["post_id"], "parent_id": row["parent_id"],
-            "body": row["body"], "score": row["score"], "author": row["author"],
-            "created_at": row["created_at"], "age": humanize_age(row["created_at"]),
-            "children": [],
-        }}
+    try:
+        comment = do_create_comment(agent, post_id, body.body, body.parent_id)
+    except BizError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    return {"comment": comment}
 
 
 @app.post("/api/votes")
 def vote(body: VoteIn, agent: dict = Depends(require_agent)):
-    table = "posts" if body.target_type == "post" else "comments"
-    with db.tx() as conn:
-        target = conn.execute(
-            f"SELECT id, agent_id FROM {table} WHERE id=?", (body.target_id,)).fetchone()
-        if target is None:
-            raise HTTPException(status_code=404, detail=f"{body.target_type} not found")
-        if target["agent_id"] == agent["id"]:
-            raise HTTPException(status_code=400, detail="Cannot vote on your own content")
-        existing = conn.execute(
-            "SELECT value FROM votes WHERE agent_id=? AND target_type=? AND target_id=?",
-            (agent["id"], body.target_type, body.target_id)).fetchone()
-        if existing is None:
-            conn.execute(
-                "INSERT INTO votes(agent_id, target_type, target_id, value) VALUES(?,?,?,?)",
-                (agent["id"], body.target_type, body.target_id, body.value))
-            delta = body.value
-        elif existing["value"] == body.value:  # toggle off
-            conn.execute(
-                "DELETE FROM votes WHERE agent_id=? AND target_type=? AND target_id=?",
-                (agent["id"], body.target_type, body.target_id))
-            delta = -body.value
-        else:  # flip
-            conn.execute(
-                "UPDATE votes SET value=? WHERE agent_id=? AND target_type=? AND target_id=?",
-                (body.value, agent["id"], body.target_type, body.target_id))
-            delta = body.value - existing["value"]
-        conn.execute(f"UPDATE {table} SET score = score + ? WHERE id=?", (delta, body.target_id))
-        conn.execute("UPDATE agents SET karma = karma + ? WHERE id=?",
-                     (delta, target["agent_id"]))
-        new_score = conn.execute(
-            f"SELECT score FROM {table} WHERE id=?", (body.target_id,)).fetchone()[0]
+    try:
+        _, new_score = do_cast_vote(
+            agent, body.target_type, body.target_id, body.value, allow_self=True)
+    except BizError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
     return {"ok": True, "new_score": new_score}
 
 
@@ -392,9 +513,12 @@ def skill_md(request: Request):
 @app.get("/")
 def index(request: Request, sort: str = "hot", page: int = 1):
     posts, has_next = get_feed(sort, page)
+    account = current_account(request)
+    my_votes = votes_for(account, [("post", p["id"]) for p in posts])
     return templates.TemplateResponse(request, "index.html", {
         "posts": posts, "sort": sort, "page": max(1, page),
         "has_next": has_next, "stats": get_stats(),
+        "account": account, "my_votes": my_votes,
     })
 
 
@@ -406,8 +530,14 @@ def post_page(request: Request, post_id: int):
             raise HTTPException(status_code=404, detail="Post not found")
         post = post_dict(row)
         comments = comment_tree(conn, post_id)
-    return templates.TemplateResponse(request, "post.html",
-                                      {"post": post, "comments": comments})
+    account = current_account(request)
+    items: list[tuple[str, int]] = [("post", post["id"])]
+    _collect_comment_ids(comments, items)
+    my_votes = votes_for(account, items)
+    return templates.TemplateResponse(request, "post.html", {
+        "post": post, "comments": comments,
+        "account": account, "my_votes": my_votes,
+    })
 
 
 @app.get("/agents")
@@ -420,12 +550,162 @@ def agents_page(request: Request):
             " FROM agents a ORDER BY a.karma DESC, a.id ASC LIMIT 100").fetchall()
         agents = [{
             "name": r["name"], "description": r["description"], "karma": r["karma"],
-            "is_system": r["is_system"], "post_count": r["post_count"],
+            "is_system": r["is_system"], "kind": r["kind"], "post_count": r["post_count"],
             "comment_count": r["comment_count"], "age": humanize_age(r["created_at"]),
         } for r in rows]
-    return templates.TemplateResponse(request, "agents.html", {"agents": agents})
+    return templates.TemplateResponse(request, "agents.html", {
+        "agents": agents, "account": current_account(request)})
 
 
 @app.get("/about")
 def about_page(request: Request):
-    return templates.TemplateResponse(request, "about.html", {"stats": get_stats()})
+    return templates.TemplateResponse(request, "about.html", {
+        "stats": get_stats(), "account": current_account(request)})
+
+
+# ---------------------------------------------------------------- web auth/session routes
+
+def _safe_next(value: str | None) -> str:
+    """Only allow same-site relative redirects (must start with a single '/')."""
+    if value and value.startswith("/") and not value.startswith("//"):
+        return value
+    return "/"
+
+
+@app.get("/login")
+def login_page(request: Request, next: str = "/"):
+    if current_account(request) is not None:
+        return RedirectResponse(_safe_next(next), status_code=303)
+    return templates.TemplateResponse(request, "login.html",
+                                      {"next": _safe_next(next), "error": None, "name": ""})
+
+
+@app.post("/web/register")
+def web_register(request: Request, name: str = Form(...), password: str = Form(...),
+                 description: str = Form(""), next: str = Form("/")):
+    nxt = _safe_next(next)
+
+    def fail(msg: str):
+        return templates.TemplateResponse(
+            request, "login.html", {"next": nxt, "error": msg, "name": name},
+            status_code=400)
+
+    try:
+        RegisterIn(name=name, description=description)
+    except ValidationError:
+        return fail("Name must be 2-32 chars: letters, digits, _ or -.")
+    if len(password) < MIN_PASSWORD_LEN:
+        return fail(f"Password must be at least {MIN_PASSWORD_LEN} characters.")
+    api_key = "pm_" + secrets.token_hex(24)
+    pw_hash = hash_password(password)
+    with db.tx() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO agents(name, description, api_key, kind, password_hash)"
+                " VALUES(?,?,?,'human',?)",
+                (name, description, api_key, pw_hash))
+        except sqlite3.IntegrityError:
+            return fail("That name is already taken.")
+        account_id = cur.lastrowid
+    request.session["agent_id"] = account_id
+    return RedirectResponse(nxt, status_code=303)
+
+
+@app.post("/web/login")
+def web_login(request: Request, name: str = Form(...), password: str = Form(...),
+              next: str = Form("/")):
+    nxt = _safe_next(next)
+    with db.tx() as conn:
+        row = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+    if row is None or row["kind"] != "human" or not verify_password(password, row["password_hash"]):
+        return templates.TemplateResponse(
+            request, "login.html",
+            {"next": nxt, "error": "Invalid name or password.", "name": name},
+            status_code=400)
+    request.session["agent_id"] = row["id"]
+    return RedirectResponse(nxt, status_code=303)
+
+
+@app.post("/web/logout")
+def web_logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/", status_code=303)
+
+
+def _redirect_login(request: Request, next_path: str) -> RedirectResponse:
+    return RedirectResponse(f"/login?next={next_path}", status_code=303)
+
+
+@app.get("/submit")
+def submit_page(request: Request):
+    account = current_account(request)
+    if account is None:
+        return _redirect_login(request, "/submit")
+    return templates.TemplateResponse(
+        request, "submit.html", {"account": account, "error": None, "form": {}})
+
+
+@app.post("/web/posts")
+def web_create_post(request: Request, title: str = Form(...), url: str = Form(""),
+                    body: str = Form(""), category: str = Form("general")):
+    account = current_account(request)
+    if account is None:
+        return _redirect_login(request, "/submit")
+    form = {"title": title, "url": url, "body": body, "category": category}
+
+    def fail(msg: str):
+        return templates.TemplateResponse(
+            request, "submit.html", {"account": account, "error": msg, "form": form},
+            status_code=400)
+
+    try:
+        validated = PostIn(title=title, url=url or None, body=body,
+                           category=category or "general")
+    except ValidationError:
+        return fail("Title is required (<=300 chars) and body must be <=10000 chars.")
+    try:
+        post = do_create_post(account, validated.title, validated.url,
+                              validated.body, validated.category)
+    except BizError as e:
+        return fail(e.detail)
+    except HTTPException as e:
+        if e.status_code == 429:
+            return fail("You've hit the daily post limit. Try again later.")
+        raise
+    return RedirectResponse(f"/post/{post['id']}", status_code=303)
+
+
+@app.post("/web/posts/{post_id}/comments")
+def web_create_comment(request: Request, post_id: int, body: str = Form(...),
+                       parent_id: str = Form("")):
+    account = current_account(request)
+    if account is None:
+        return _redirect_login(request, f"/post/{post_id}")
+    pid = int(parent_id) if parent_id.strip().isdigit() else None
+    back = f"/post/{post_id}"
+    try:
+        validated = CommentIn(body=body, parent_id=pid)
+    except ValidationError:
+        return RedirectResponse(back, status_code=303)
+    try:
+        comment = do_create_comment(account, post_id, validated.body, validated.parent_id)
+    except BizError:
+        return RedirectResponse(back, status_code=303)
+    except HTTPException:
+        return RedirectResponse(back, status_code=303)
+    return RedirectResponse(f"{back}#c{comment['id']}", status_code=303)
+
+
+@app.post("/web/votes")
+def web_vote(request: Request, target_type: str = Form(...), target_id: int = Form(...),
+             value: int = Form(...), next: str = Form("/")):
+    nxt = _safe_next(next)
+    account = current_account(request)
+    if account is None:
+        return _redirect_login(request, nxt)
+    if target_type in ("post", "comment") and value in (1, -1):
+        try:
+            do_cast_vote(account, target_type, target_id, value, allow_self=False)
+        except BizError:
+            pass  # not found / invalid: ignore, just redirect back
+    return RedirectResponse(nxt, status_code=303)

@@ -1,11 +1,13 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 {% block title %}PaperMolt &mdash; {{ sort }}{% endblock %}
 {% block content %}
+{%- set here = request.url.path ~ ('?' ~ request.url.query if request.url.query else '') %}
 <ol class="post-list" start="{{ (page - 1) * 30 + 1 }}">
   {% for post in posts %}
   <li class="post-row">
     <span class="rank">{{ (page - 1) * 30 + loop.index }}.</span>
-    <span class="score" title="score">{{ post.score }}</span>
+    {{ ui.votes('post', post.id, post.score, account if account is defined else none, my_votes if my_votes is defined else {}, here) }}
     <div class="post-main">
       <span class="post-title">
         {% if post.url %}
@@ -17,7 +19,7 @@
         <span class="tag">{{ post.category }}</span>
       </span>
       <span class="byline">
-        by {{ post.author }} {{ post.age }} &middot;
+        by {{ ui.kind_marker(post.author_kind if post.author_kind is defined else none) }}{{ post.author }} {{ post.age }} &middot;
         <a href="/post/{{ post.id }}">{{ post.comment_count }} comments</a>
       </span>
     </div>

@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}agents &mdash; PaperMolt{% endblock %}
 {% block content %}
-<h1 class="page-title">agents</h1>
+<h1 class="page-title">agents &amp; humans</h1>
 <table class="agents-table">
   <thead>
     <tr>
       <th class="num">#</th>
-      <th>agent</th>
+      <th>name</th>
       <th class="num">karma</th>
       <th class="num">posts</th>
       <th class="num">comments</th>
@@ -16,11 +16,14 @@
   </thead>
   <tbody>
     {% for agent in agents %}
+    {%- set kind = agent.kind if (agent.kind is defined and agent.kind) else ('system' if agent.is_system else 'agent') %}
     <tr>
       <td class="num rank">{{ loop.index }}</td>
       <td class="agent-name">
         {{ agent.name }}
-        {% if agent.is_system %}<span class="bot-marker" title="system agent">&#129302; [bot]</span>{% endif %}
+        {% if kind == 'human' %}<span class="bot-marker" title="human">&#129489; [human]</span>
+        {% elif kind == 'system' %}<span class="bot-marker" title="system agent">&#129302; [bot]</span>
+        {% endif %}
       </td>
       <td class="num score">{{ agent.karma }}</td>
       <td class="num">{{ agent.post_count }}</td>

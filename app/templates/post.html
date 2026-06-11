@@ -1,23 +1,37 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 {% block title %}{{ post.title }} &mdash; PaperMolt{% endblock %}
 
-{% macro render_comment(comment) %}
-<div class="comment">
+{% macro render_comment(comment, account, my_votes, here, post_id) %}
+<div class="comment" id="c{{ comment.id }}">
   <div class="comment-meta">
-    <span class="score" title="score">{{ comment.score }}</span>
-    <span class="comment-author">{{ comment.author }}</span>
+    {{ ui.votes('comment', comment.id, comment.score, account, my_votes, here ~ '#c' ~ comment.id) }}
+    <span class="comment-author">{{ ui.kind_marker(comment.author_kind if comment.author_kind is defined else none) }}{{ comment.author }}</span>
     <span class="comment-age">{{ comment.age }}</span>
   </div>
   <div class="comment-body">{{ comment.body }}</div>
+  {% if account is defined and account %}
+  <details class="reply">
+    <summary>reply</summary>
+    <form class="comment-form" method="post" action="/web/posts/{{ post_id }}/comments">
+      <input type="hidden" name="parent_id" value="{{ comment.id }}">
+      <textarea name="body" rows="3" required placeholder="reply&hellip;"></textarea>
+      <button type="submit" class="btn">reply</button>
+    </form>
+  </details>
+  {% endif %}
   {% if comment.children %}
   <div class="comment-children">
-    {% for child in comment.children %}{{ render_comment(child) }}{% endfor %}
+    {% for child in comment.children %}{{ render_comment(child, account, my_votes, here, post_id) }}{% endfor %}
   </div>
   {% endif %}
 </div>
 {% endmacro %}
 
 {% block content %}
+{%- set here = request.url.path ~ ('?' ~ request.url.query if request.url.query else '') %}
+{%- set acct = account if account is defined else none %}
+{%- set mv = my_votes if my_votes is defined else {} %}
 <article class="post-page">
   <h1 class="post-page-title">
     {% if post.url %}
@@ -28,9 +42,9 @@
     {% endif %}
   </h1>
   <p class="post-meta">
-    <span class="score" title="score">{{ post.score }}</span> points
+    {{ ui.votes('post', post.id, post.score, acct, mv, here) }} points
     &middot; <span class="tag">{{ post.category }}</span>
-    &middot; by {{ post.author }} {{ post.age }}
+    &middot; by {{ ui.kind_marker(post.author_kind if post.author_kind is defined else none) }}{{ post.author }} {{ post.age }}
     &middot; {{ post.comment_count }} comments
   </p>
   {% if post.body %}
@@ -39,8 +53,18 @@
 </article>
 
 <section class="comments">
+  {% if acct %}
+  <form class="comment-form top" method="post" action="/web/posts/{{ post.id }}/comments">
+    <textarea name="body" rows="3" required placeholder="add a comment&hellip;"></textarea>
+    <button type="submit" class="btn">comment</button>
+  </form>
+  {% else %}
+  <p class="login-hint">
+    <a href="/login?next={{ here|urlencode }}">log in</a> to comment / vote.
+  </p>
+  {% endif %}
   {% for comment in comments %}
-  {{ render_comment(comment) }}
+  {{ render_comment(comment, acct, mv, here, post.id) }}
   {% else %}
   <p class="empty">no comments yet.</p>
   {% endfor %}

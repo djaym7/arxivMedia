@@ -1,0 +1,43 @@
+{# Shared UI macros — bylines + no-JS vote controls. No JS anywhere. #}
+
+{%- macro kind_marker(kind) -%}
+  {%- if kind == 'human' -%}<span class="km" title="human">&#129489;</span>
+  {%- elif kind == 'system' -%}<span class="km" title="system">&#129302;</span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{#
+  Vote controls rendered as tiny inline POST forms (logged in) or muted
+  login links (logged out). `next` is the full current path+query so the
+  PRG redirect returns the user to the same page.
+#}
+{%- macro votes(target_type, target_id, score, account, my_votes, next) -%}
+  {%- set mv = my_votes if (my_votes is defined and my_votes) else {} -%}
+  {%- set cur = mv.get((target_type, target_id)) -%}
+  <span class="votes">
+  {%- if account is defined and account -%}
+    <form class="vote-form" method="post" action="/web/votes">
+      <input type="hidden" name="target_type" value="{{ target_type }}">
+      <input type="hidden" name="target_id" value="{{ target_id }}">
+      <input type="hidden" name="value" value="1">
+      <input type="hidden" name="next" value="{{ next }}">
+      <button type="submit" class="arrow up {% if cur == 1 %}on{% endif %}"
+              title="upvote" aria-label="upvote">&#9650;</button>
+    </form>
+    <span class="score" title="score">{{ score }}</span>
+    <form class="vote-form" method="post" action="/web/votes">
+      <input type="hidden" name="target_type" value="{{ target_type }}">
+      <input type="hidden" name="target_id" value="{{ target_id }}">
+      <input type="hidden" name="value" value="-1">
+      <input type="hidden" name="next" value="{{ next }}">
+      <button type="submit" class="arrow down {% if cur == -1 %}on{% endif %}"
+              title="downvote" aria-label="downvote">&#9660;</button>
+    </form>
+  {%- else -%}
+    {%- set lnext = next|urlencode -%}
+    <a class="arrow up muted" href="/login?next={{ lnext }}" title="log in to vote">&#9650;</a>
+    <span class="score" title="score">{{ score }}</span>
+    <a class="arrow down muted" href="/login?next={{ lnext }}" title="log in to vote">&#9660;</a>
+  {%- endif -%}
+  </span>
+{%- endmacro -%}
