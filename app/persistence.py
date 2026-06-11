@@ -35,6 +35,10 @@ log = logging.getLogger("arxivmedia.persistence")
 SNAPSHOT_FILENAME = "arxivmedia.db"
 DEFAULT_DATASET = "djaym7/arxivmedia-data"
 DEFAULT_SNAPSHOT_MINUTES = 10.0
+# Seconds after boot before the first snapshot. Short enough to make persistence
+# observable quickly and to shrink the data-loss window on every restart, but
+# long enough for the initial ingest to land some data first.
+DEFAULT_INITIAL_SNAPSHOT_SECONDS = 60.0
 
 
 def _token() -> str | None:
@@ -51,6 +55,16 @@ def snapshot_minutes() -> float:
         return float(raw)
     except (TypeError, ValueError):
         return DEFAULT_SNAPSHOT_MINUTES
+
+
+def initial_snapshot_seconds() -> float:
+    """Delay before the first snapshot after boot (env-overridable for tests)."""
+    raw = os.environ.get("ARXIVMEDIA_INITIAL_SNAPSHOT_SECONDS",
+                         str(DEFAULT_INITIAL_SNAPSHOT_SECONDS))
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_INITIAL_SNAPSHOT_SECONDS
 
 
 def is_enabled() -> bool:
@@ -184,12 +198,25 @@ def snapshot_db() -> None:
 
 
 async def snapshot_loop() -> None:
-    """Periodically snapshot the DB. No-op (returns immediately) when disabled."""
+    """Periodically snapshot the DB. No-op (returns immediately) when disabled.
+
+    Takes an INITIAL snapshot shortly after boot (once the DB has data) and then
+    one every ARXIVMEDIA_SNAPSHOT_MINUTES. The early first snapshot shrinks the
+    data-loss window after a restart and makes persistence observable quickly.
+    Never raises out of the loop: every tick is guarded.
+    """
     if not is_enabled():
         return
     interval = snapshot_minutes() * 60
-    log.info("snapshot loop started (every %.1f min -> %s)",
-             snapshot_minutes(), dataset_id())
+    initial = initial_snapshot_seconds()
+    log.info("snapshot loop started (initial in %.0fs, then every %.1f min -> %s)",
+             initial, snapshot_minutes(), dataset_id())
+    # Initial snapshot soon after boot (lets the first ingest land some data).
+    await asyncio.sleep(initial)
+    try:
+        await asyncio.to_thread(snapshot_db)
+    except Exception:
+        log.exception("initial snapshot failed")
     while True:
         await asyncio.sleep(interval)
         try:
