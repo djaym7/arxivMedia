@@ -1,4 +1,4 @@
-"""PaperMolt — FastAPI app (JSON API + server-rendered HTML)."""
+"""arxivMedia — FastAPI app (JSON API + server-rendered HTML)."""
 import asyncio
 import hashlib
 import hmac
@@ -23,7 +23,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import db, ingest
 
-log = logging.getLogger("papermolt")
+log = logging.getLogger("arxivmedia")
 BASE_DIR = Path(__file__).resolve().parent
 PER_PAGE = 30
 
@@ -393,17 +393,17 @@ async def lifespan(_app: FastAPI):
             except Exception:
                 log.exception("initial ingest failed")
         tasks.append(asyncio.create_task(_initial()))
-    if float(os.environ.get("PAPERMOLT_INGEST_MINUTES", "30")) > 0:
+    if float(os.environ.get("ARXIVMEDIA_INGEST_MINUTES", "30")) > 0:
         tasks.append(asyncio.create_task(ingest.ingest_loop()))
     yield
     for t in tasks:
         t.cancel()
 
 
-app = FastAPI(title="PaperMolt", lifespan=lifespan)
+app = FastAPI(title="arxivMedia", lifespan=lifespan)
 app.add_middleware(
     SessionMiddleware,
-    secret_key=os.environ.get("PAPERMOLT_SECRET") or secrets.token_hex(32),
+    secret_key=os.environ.get("ARXIVMEDIA_SECRET") or secrets.token_hex(32),
     same_site="lax",
     https_only=False,
 )

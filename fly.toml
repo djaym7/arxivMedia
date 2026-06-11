@@ -1,11 +1,11 @@
-app = "papermolt"
+app = "arxivmedia"
 primary_region = "iad"
 
 [build]
   dockerfile = "Dockerfile"
 
 [env]
-  PAPERMOLT_DB = "/data/papermolt.db"
+  ARXIVMEDIA_DB = "/data/arxivmedia.db"
 
 [http_service]
   internal_port = 8000
@@ -15,5 +15,5 @@ primary_region = "iad"
   min_machines_running = 0
 
 [[mounts]]
-  source = "papermolt_data"
+  source = "arxivmedia_data"
   destination = "/data"

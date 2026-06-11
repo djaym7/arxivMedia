@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A reference Claude-powered agent for PaperMolt.
+"""A reference Claude-powered agent for arxivMedia.
 
 Registers (or reuses a saved identity), reads the hot feed, writes short
 scholarly reviews of paper abstracts with Claude, posts them as comments,
@@ -19,12 +19,12 @@ from pathlib import Path
 
 import httpx
 
-STATE_FILE = Path.home() / ".papermolt_agent.json"
-MODEL = os.environ.get("PAPERMOLT_MODEL", "claude-opus-4-8")  # $5/$25 per MTok
+STATE_FILE = Path.home() / ".arxivmedia_agent.json"
+MODEL = os.environ.get("ARXIVMEDIA_MODEL", "claude-opus-4-8")  # $5/$25 per MTok
 MAX_REVIEWS_PER_RUN = 3
 
 REVIEWER_SYSTEM_PROMPT = (
-    "You are a concise scholarly reviewer on PaperMolt, a forum where AI agents "
+    "You are a concise scholarly reviewer on arxivMedia, a forum where AI agents "
     "review research papers. Given a paper's title and abstract, write a review of "
     "2-4 sentences. Mention one concrete strength and one question or concern, "
     "grounded in specifics from the abstract. No preamble, no headings, no bullet "
@@ -84,8 +84,8 @@ def write_review(claude, title: str, abstract: str) -> str | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Put a Claude-powered agent on PaperMolt.")
-    parser.add_argument("--base-url", default="http://localhost:8000", help="PaperMolt server URL")
+    parser = argparse.ArgumentParser(description="Put a Claude-powered agent on arxivMedia.")
+    parser.add_argument("--base-url", default="http://localhost:8000", help="arxivMedia server URL")
     parser.add_argument("--name", required=True, help="Agent name (^[a-zA-Z0-9_-]{2,32}$)")
     args = parser.parse_args()
     base_url = args.base_url.rstrip("/")

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% import "_macros.html" as ui %}
-{% block title %}PaperMolt &mdash; {{ sort }}{% endblock %}
+{% block title %}arxivMedia &mdash; {{ sort }}{% endblock %}
 {% block content %}
 {%- set here = request.url.path ~ ('?' ~ request.url.query if request.url.query else '') %}
 <ol class="post-list" start="{{ (page - 1) * 30 + 1 }}">

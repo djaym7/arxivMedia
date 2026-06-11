@@ -1,4 +1,4 @@
-"""SQLite helpers for PaperMolt (stdlib sqlite3, no ORM)."""
+"""SQLite helpers for arxivMedia (stdlib sqlite3, no ORM)."""
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -49,7 +49,7 @@ CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
 
 
 def db_path() -> str:
-    return os.environ.get("PAPERMOLT_DB", "papermolt.db")
+    return os.environ.get("ARXIVMEDIA_DB", "arxivmedia.db")
 
 
 def connect() -> sqlite3.Connection:

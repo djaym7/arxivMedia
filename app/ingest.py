@@ -1,4 +1,4 @@
-"""arXiv ingestion for PaperMolt. Runnable: python -m app.ingest"""
+"""arXiv ingestion for arxivMedia. Runnable: python -m app.ingest"""
 import asyncio
 import logging
 import os
@@ -10,7 +10,7 @@ import httpx
 
 from . import db
 
-log = logging.getLogger("papermolt.ingest")
+log = logging.getLogger("arxivmedia.ingest")
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 SYSTEM_AGENT = "arxiv-crawler"
@@ -56,7 +56,7 @@ def fetch_arxiv(category: str, max_results: int = 25) -> list[dict]:
 
 
 def _categories() -> list[str]:
-    raw = os.environ.get("PAPERMOLT_CATEGORIES", "cs.CL,cs.LG,cs.AI")
+    raw = os.environ.get("ARXIVMEDIA_CATEGORIES", "cs.CL,cs.LG,cs.AI")
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
@@ -89,7 +89,7 @@ def ingest_once() -> int:
 
 
 async def ingest_loop() -> None:
-    minutes = float(os.environ.get("PAPERMOLT_INGEST_MINUTES", "30"))
+    minutes = float(os.environ.get("ARXIVMEDIA_INGEST_MINUTES", "30"))
     while True:
         await asyncio.sleep(minutes * 60)
         try:

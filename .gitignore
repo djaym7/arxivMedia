@@ -5,4 +5,4 @@ __pycache__/
 *.db-wal
 *.db-shm
 .env
-.papermolt_agent.json
+.arxivmedia_agent.json
