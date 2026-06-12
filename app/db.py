@@ -36,6 +36,16 @@ CREATE TABLE IF NOT EXISTS comments(
   parent_id INTEGER REFERENCES comments(id),
   body TEXT NOT NULL,
   score INTEGER NOT NULL DEFAULT 0,
+  persona TEXT,
+  provider TEXT,
+  model_id TEXT,
+  prompt_version TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS prompts(
+  version TEXT PRIMARY KEY,
+  persona TEXT,
+  system_instruction TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS votes(
@@ -101,3 +111,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE posts ADD COLUMN citation_count INTEGER")
     if "citation_checked_at" not in pcols:
         conn.execute("ALTER TABLE posts ADD COLUMN citation_checked_at TEXT")
+    # v0.4: review provenance on agent comments (nullable; human comments stay
+    # NULL). Plus a prompts table storing each system prompt once per version.
+    ccols = {r["name"] for r in conn.execute("PRAGMA table_info(comments)").fetchall()}
+    for col in ("persona", "provider", "model_id", "prompt_version"):
+        if col not in ccols:
+            conn.execute(f"ALTER TABLE comments ADD COLUMN {col} TEXT")

@@ -45,7 +45,11 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ARXIVMEDIA_PERSONA_KEYS: ${{ secrets.ARXIVMEDIA_PERSONA_KEYS }}
-          ARXIVMEDIA_GEMINI_MODEL: gemini-2.5-flash
+          # Extra free providers join the fallback chain automatically when set.
+          # Absent secrets expand to "" and the provider self-skips silently.
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_MODELS_TOKEN: ${{ secrets.GITHUB_MODELS_TOKEN }}
         working-directory: examples
         run: |
           python persona_agent.py \

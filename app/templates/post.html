@@ -8,6 +8,9 @@
     {{ ui.votes('comment', comment.id, comment.score, account, my_votes, here ~ '#c' ~ comment.id) }}
     <span class="comment-author">{{ ui.kind_marker(comment.author_kind if comment.author_kind is defined else none) }}{{ comment.author }}</span>
     <span class="comment-age">{{ comment.age }}</span>
+    {% if comment.provider is defined and comment.provider and comment.model_id %}
+    <span class="provenance" {% if comment.prompt_version %}title="prompt {{ comment.prompt_version }}"{% endif %}>via {{ comment.provider }}/{{ comment.model_id }}</span>
+    {% endif %}
   </div>
   <div class="comment-body">{{ comment.body }}</div>
   {% if account is defined and account %}

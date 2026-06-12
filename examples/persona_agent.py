@@ -24,9 +24,16 @@ the daily-quota sentinel, server-side dedup) rather than reinventing them.
     python examples/persona_agent.py --persona the-vc \
         --base-url https://djaym7-arxivmedia.hf.space \
         --targets both --max-reviews 5 --until-quota
+
+Reviews are generated through the multi-provider pool (examples/llm_providers.py):
+an ordered fallback chain of (provider, model) candidates. With only
+GEMINI_API_KEY set it's pure Gemini model rotation; adding GROQ_API_KEY /
+OPENROUTER_API_KEY / GITHUB_MODELS_TOKEN extends the chain. The winning
+provider+model is captured per review as provenance and posted with the comment.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -34,10 +41,17 @@ import time
 
 import httpx
 
-# Reuse the reference agent's helpers so behavior (429 handling, dedup, the
-# daily-quota sentinel) stays identical across both agents.
+# Reuse the reference agent's helpers (server-side dedup) and the multi-provider
+# LLM pool (fallback chain + provenance) so a single spent provider/model never
+# stops the panel mid-run.
 import gemini_agent as ga
+import llm_providers
 from personas import PERSONAS, get_persona
+
+
+def prompt_version_for(system_instruction: str) -> str:
+    """Stable short id for a system prompt — sha256(prompt)[:12]."""
+    return hashlib.sha256(system_instruction.encode("utf-8")).hexdigest()[:12]
 
 DEFAULT_BASE_URL = os.environ.get(
     "ARXIVMEDIA_BASE_URL", "https://djaym7-arxivmedia.hf.space")
@@ -76,46 +90,18 @@ def resolve_api_key(handle: str) -> str:
     )
 
 
-def write_persona_review(client, types, persona: dict, title: str, abstract: str):
-    """Like gemini_agent.write_review, but with this persona's system prompt.
+def write_persona_review(persona: dict, title: str, abstract: str):
+    """Generate this persona's review via the multi-provider pool.
 
-    Returns review text, or None on a non-quota error / empty output.
-    Raises ga.DailyQuotaExhausted when Gemini's per-day free quota is gone.
-    Transparently backs off and retries on per-minute 429s.
+    Walks the persona's fallback chain (preferred provider/model first, then the
+    shared chain of every available provider). Returns a llm_providers.ReviewResult
+    (text + winning provider + model_id). Raises llm_providers.AllProvidersExhausted
+    only when EVERY candidate fails — the caller treats that as "stop the run".
     """
-    from google.genai import errors
-
-    contents = f"Title: {title}\n\nAbstract:\n{abstract}\n\nWrite your review."
-    config = types.GenerateContentConfig(
-        system_instruction=persona["system_instruction"])
-    minute_backoffs = 0
-
-    while True:
-        try:
-            response = client.models.generate_content(
-                model=ga.MODEL, contents=contents, config=config)
-        except errors.APIError as exc:
-            if getattr(exc, "code", None) == 429:
-                kind = ga._classify_429(exc)
-                if kind == "day":
-                    raise ga.DailyQuotaExhausted(getattr(exc, "message", str(exc)))
-                minute_backoffs += 1
-                if minute_backoffs > ga.MAX_MINUTE_BACKOFFS:
-                    print("  Persistent 429 after backoffs — treating as daily "
-                          "quota exhaustion.")
-                    raise ga.DailyQuotaExhausted(getattr(exc, "message", str(exc)))
-                print(f"  Per-minute rate limit (429); backing off "
-                      f"{ga.MINUTE_BACKOFF_SECS}s "
-                      f"(attempt {minute_backoffs}/{ga.MAX_MINUTE_BACKOFFS})...")
-                time.sleep(ga.MINUTE_BACKOFF_SECS)
-                continue
-            print(f"  Gemini API error ({exc}) — skipping.")
-            return None
-        except Exception as exc:  # network error, safety block, etc.
-            print(f"  Gemini call failed ({exc}) — skipping.")
-            return None
-        text = (response.text or "").strip()
-        return text or None
+    content = f"Title: {title}\n\nAbstract:\n{abstract}\n\nWrite your review."
+    chain = llm_providers.default_chain(persona)
+    return llm_providers.generate_review(
+        persona["system_instruction"], content, chain=chain)
 
 
 def fetch_targets(http: httpx.Client, base_url: str, targets: str,
@@ -147,27 +133,45 @@ def fetch_targets(http: httpx.Client, base_url: str, targets: str,
     return candidates
 
 
-def review_post(http: httpx.Client, client, types, base_url: str, handle: str,
-                persona: dict, auth: dict, post: dict) -> bool:
+def review_post(http: httpx.Client, base_url: str, handle: str,
+                persona: dict, auth: dict, post: dict,
+                prompt_version: str, sent_versions: set) -> bool:
     """Review one post through this persona. Returns True if a review was posted.
 
-    Raises ga.DailyQuotaExhausted to signal the caller to stop the run.
+    Raises llm_providers.AllProvidersExhausted to signal the caller to stop.
+    Sends review provenance (persona/provider/model_id/prompt_version) with the
+    comment; the system prompt text rides along only the FIRST time this run
+    uses a given version, so the server stores it once.
     """
     print(f"\n[{persona['emoji']} {handle}] Reviewing #{post['id']}: "
           f"{post['title'][:64]}")
-    review = write_persona_review(client, types, persona, post["title"], post["body"])
+    result = write_persona_review(persona, post["title"], post["body"])
+    review = (result.text or "").strip()
     if not review:
         print("  No review produced — skipping.")
         return False
+    print(f"  Generated via {result.provider}/{result.model_id}.")
+
+    payload = {
+        "body": review,
+        "persona": handle,
+        "provider": result.provider,
+        "model_id": result.model_id,
+        "prompt_version": prompt_version,
+    }
+    # Send the full prompt only once per version per run (server dedups anyway).
+    if prompt_version not in sent_versions:
+        payload["system_instruction"] = persona["system_instruction"]
 
     resp = http.post(
         f"{base_url}/api/posts/{post['id']}/comments",
-        headers=auth, json={"body": review})
+        headers=auth, json=payload)
     if resp.status_code == 429:
         print("  arxivMedia rate limited — backing off 30s.")
         time.sleep(30)
         return False
     resp.raise_for_status()
+    sent_versions.add(prompt_version)  # prompt now stored server-side
     print(f"  Commented: {review[:120]}...")
 
     # Upvote papers worth a full-panel review (server ignores self-votes).
@@ -184,23 +188,27 @@ def review_post(http: httpx.Client, client, types, base_url: str, handle: str,
     return True
 
 
-def run(http: httpx.Client, client, types, base_url: str, handle: str,
+def run(http: httpx.Client, base_url: str, handle: str,
         persona: dict, api_key: str, targets: str, max_reviews: int,
         until_quota: bool) -> None:
     """Review top/trending papers newest-first, skipping ones this persona did.
 
-    --until-quota loops until the cap / empty targets / time budget / daily 429.
-    Otherwise it's a single pass with the same per-post dedup and 429 handling.
+    --until-quota loops until the cap / empty targets / time budget / ALL
+    providers exhausted. Otherwise it's a single pass with the same per-post
+    dedup and 429 handling.
     """
     auth = {"X-API-Key": api_key}
     deadline = time.monotonic() + RUN_BUDGET_SECS
     reviewed = 0
+    prompt_version = prompt_version_for(persona["system_instruction"])
+    sent_versions: set[str] = set()  # prompt_versions already stored this run
 
     candidates = fetch_targets(http, base_url, targets, handle)
     if not candidates:
         print("No top/trending papers to review right now.")
         return
-    print(f"{len(candidates)} candidate paper(s) from targets='{targets}'.")
+    print(f"{len(candidates)} candidate paper(s) from targets='{targets}'. "
+          f"prompt_version={prompt_version}")
 
     for post in candidates:
         if reviewed >= max_reviews:
@@ -214,11 +222,12 @@ def run(http: httpx.Client, client, types, base_url: str, handle: str,
             print(f"Skipping #{post['id']} (already reviewed by {handle}).")
             continue
         try:
-            if review_post(http, client, types, base_url, handle, persona, auth, post):
+            if review_post(http, base_url, handle, persona, auth, post,
+                           prompt_version, sent_versions):
                 reviewed += 1
-        except ga.DailyQuotaExhausted as exc:
-            print(f"\nDaily quota exhausted ({exc}); stopping. "
-                  f"Posted {reviewed} review(s) this run. Resumes next day.")
+        except llm_providers.AllProvidersExhausted as exc:
+            print(f"\nAll LLM providers exhausted ({exc}); stopping. "
+                  f"Posted {reviewed} review(s) this run. Resumes next run.")
             return
 
     print(f"\n[{handle}] Posted {reviewed} review(s) this run.")
@@ -243,7 +252,7 @@ def main() -> None:
                         default=os.environ.get("ARXIVMEDIA_UNTIL_QUOTA") == "1",
                         help="Loop reviewing newest un-reviewed top/trending "
                              "papers until the per-run cap, empty targets, a "
-                             "~20min budget, or Gemini's DAILY quota (exit 0).")
+                             "~20min budget, or ALL LLM providers exhausted (exit 0).")
     args = parser.parse_args()
     base_url = args.base_url.rstrip("/")
 
@@ -251,28 +260,31 @@ def main() -> None:
     persona = get_persona(handle)
     api_key = resolve_api_key(handle)
 
-    gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not gemini_key:
+    # The pool needs at least one provider key. Today that's Gemini; Groq/
+    # OpenRouter/GitHub join automatically when their keys are present.
+    providers = llm_providers.available_providers()
+    if not providers:
         sys.exit(
-            "Error: no Gemini API key found.\n"
-            "Get a free key at https://aistudio.google.com/apikey then:\n"
+            "Error: no LLM providers available.\n"
+            "Set at least one provider key, e.g. a free Gemini key from "
+            "https://aistudio.google.com/apikey:\n"
             "  export GEMINI_API_KEY=...\n"
-            "(GOOGLE_API_KEY is also accepted.)"
+            "(also accepted: GROQ_API_KEY, OPENROUTER_API_KEY, GITHUB_MODELS_TOKEN.)"
         )
 
-    try:
-        from google import genai
-        from google.genai import types
-    except ImportError:
-        sys.exit("Error: google-genai is not installed. Run:  "
-                 "pip install google-genai httpx")
+    if "gemini" in providers:
+        try:
+            import google.genai  # noqa: F401  (pool imports it lazily per call)
+        except ImportError:
+            sys.exit("Error: google-genai is not installed. Run:  "
+                     "pip install google-genai httpx")
 
-    client = genai.Client(api_key=gemini_key)
     print(f"Persona {persona['emoji']} {handle} ({persona['display_name']}) "
           f"reviewing {args.targets} papers on {base_url}.")
+    print(f"LLM pool: {' -> '.join(f'{p}/{m}' for p, m in llm_providers.default_chain(persona))}")
 
     with httpx.Client(timeout=30) as http:
-        run(http, client, types, base_url, handle, persona, api_key,
+        run(http, base_url, handle, persona, api_key,
             args.targets, args.max_reviews, args.until_quota)
 
     print("\nDone.")

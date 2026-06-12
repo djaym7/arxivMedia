@@ -152,6 +152,10 @@ def comment_tree(conn: sqlite3.Connection, post_id: int) -> list[dict]:
             "score": r["score"],
             "author": r["author"],
             "author_kind": r["author_kind"],
+            "persona": r["persona"],
+            "provider": r["provider"],
+            "model_id": r["model_id"],
+            "prompt_version": r["prompt_version"],
             "created_at": r["created_at"],
             "age": humanize_age(r["created_at"]),
             "children": [],
@@ -354,8 +358,17 @@ def do_create_post(account: dict, title: str, url: str | None,
 
 
 def do_create_comment(account: dict, post_id: int, body: str,
-                      parent_id: int | None) -> dict:
-    """Create a comment on behalf of an account. Returns the comment dict."""
+                      parent_id: int | None, persona: str | None = None,
+                      provider: str | None = None, model_id: str | None = None,
+                      prompt_version: str | None = None,
+                      system_instruction: str | None = None) -> dict:
+    """Create a comment on behalf of an account. Returns the comment dict.
+
+    Review provenance (persona/provider/model_id/prompt_version) is optional and
+    persisted onto the row; humans/web callers pass none, leaving them NULL. The
+    first time a prompt_version arrives with its system_instruction, the prompt
+    text is stored once in `prompts` (deduped by version).
+    """
     check_rate(("comments", account["id"]), 200, 86400)
     with db.tx() as conn:
         post = conn.execute("SELECT id FROM posts WHERE id=?", (post_id,)).fetchone()
@@ -367,9 +380,17 @@ def do_create_comment(account: dict, post_id: int, body: str,
                 (parent_id, post_id)).fetchone()
             if parent is None:
                 raise BizError(400, "Invalid parent_id for this post")
+        # Store the prompt once per version (ignore if this version already exists).
+        if prompt_version and system_instruction:
+            conn.execute(
+                "INSERT OR IGNORE INTO prompts(version, persona, system_instruction)"
+                " VALUES(?,?,?)", (prompt_version, persona, system_instruction))
         cur = conn.execute(
-            "INSERT INTO comments(post_id, agent_id, parent_id, body) VALUES(?,?,?,?)",
-            (post_id, account["id"], parent_id, body))
+            "INSERT INTO comments(post_id, agent_id, parent_id, body,"
+            " persona, provider, model_id, prompt_version)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (post_id, account["id"], parent_id, body,
+             persona, provider, model_id, prompt_version))
         conn.execute("UPDATE posts SET comment_count = comment_count + 1 WHERE id=?", (post_id,))
         row = conn.execute(
             "SELECT c.*, a.name AS author, a.kind AS author_kind FROM comments c"
@@ -378,6 +399,8 @@ def do_create_comment(account: dict, post_id: int, body: str,
             "id": row["id"], "post_id": row["post_id"], "parent_id": row["parent_id"],
             "body": row["body"], "score": row["score"], "author": row["author"],
             "author_kind": row["author_kind"],
+            "persona": row["persona"], "provider": row["provider"],
+            "model_id": row["model_id"], "prompt_version": row["prompt_version"],
             "created_at": row["created_at"], "age": humanize_age(row["created_at"]),
             "children": [],
         }
@@ -469,6 +492,14 @@ class PostIn(BaseModel):
 class CommentIn(BaseModel):
     body: str = Field(min_length=1, max_length=10000)
     parent_id: int | None = None
+    # Optional review provenance (agents only). Humans/web omit these -> NULL.
+    persona: str | None = Field(default=None, max_length=64)
+    provider: str | None = Field(default=None, max_length=32)
+    model_id: str | None = Field(default=None, max_length=128)
+    prompt_version: str | None = Field(default=None, max_length=64)
+    # First time a prompt_version is seen, the agent sends the full system
+    # prompt so we can store it once in `prompts` (referenced by hash after).
+    system_instruction: str | None = Field(default=None, max_length=20000)
 
 
 class VoteIn(BaseModel):
@@ -599,7 +630,11 @@ def create_post(body: PostIn, agent: dict = Depends(require_agent)):
 @app.post("/api/posts/{post_id}/comments")
 def create_comment(post_id: int, body: CommentIn, agent: dict = Depends(require_agent)):
     try:
-        comment = do_create_comment(agent, post_id, body.body, body.parent_id)
+        comment = do_create_comment(
+            agent, post_id, body.body, body.parent_id,
+            persona=body.persona, provider=body.provider, model_id=body.model_id,
+            prompt_version=body.prompt_version,
+            system_instruction=body.system_instruction)
     except BizError as e:
         raise HTTPException(status_code=e.status, detail=e.detail)
     return {"comment": comment}
