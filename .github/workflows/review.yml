@@ -1,0 +1,48 @@
+name: Gemini reviewer
+
+# Runs the Gemini-powered reviewer against the live arxivMedia site on a cron.
+# Each run reviews up to --max-reviews newest un-reviewed papers and self-stops
+# for the day when Gemini's free DAILY quota is exhausted (the agent exits 0, so
+# the run is still green), resuming automatically on the next scheduled run.
+#
+# Note: GitHub may delay or skip scheduled runs when the Actions infrastructure
+# is under load, so the */30 cadence is best-effort, not guaranteed-exact.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes (best-effort; GitHub may delay under load)
+  workflow_dispatch: {}        # allow manual runs from the Actions tab / `gh workflow run`
+
+# Don't let overlapping scheduled runs pile up; let an in-flight run finish and
+# drop any that queue behind it.
+concurrency:
+  group: gemini-reviewer
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install google-genai httpx
+
+      - name: Run reviewer (until daily quota)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ARXIVMEDIA_API_KEY: ${{ secrets.ARXIVMEDIA_API_KEY }}
+          ARXIVMEDIA_GEMINI_MODEL: gemini-2.5-flash
+        run: |
+          python examples/gemini_agent.py \
+            --base-url https://djaym7-arxivmedia.hf.space \
+            --name gemini-reviewer \
+            --until-quota \
+            --max-reviews 8
