@@ -55,6 +55,12 @@ IGNORE_PATTERNS = ["**/__pycache__/**", "*.db", "*.db-wal", "*.db-shm"]
 SPACE_VARIABLES = {
     "ARXIVMEDIA_DB": "/tmp/arxivmedia.db",
     "ARXIVMEDIA_INGEST_MINUTES": "30",
+    # Seed the curated seminal-paper set on boot (idempotent). Gives the
+    # "Most Cited" feed real heavyweights with large OpenAlex citation counts.
+    "ARXIVMEDIA_SEED_PAPERS": "1",
+    # Walk back a couple of historical arXiv pages per category each cycle so the
+    # corpus keeps growing organically (polite ~1 req/3s pacing). Conservative.
+    "ARXIVMEDIA_BACKFILL_PAGES": "2",
 }
 
 

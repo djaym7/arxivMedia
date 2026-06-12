@@ -86,14 +86,18 @@ def _domain(url: str | None) -> str:
 
 
 def _citation_url(row: sqlite3.Row) -> str | None:
-    """Derive a Semantic Scholar paper URL for an arXiv post with a known count."""
+    """Derive a paper URL for an arXiv post with a known citation count.
+
+    Links to the arXiv abstract page (citation counts now come from OpenAlex,
+    which keys arXiv works by this abs URL).
+    """
     if row["citation_count"] is None:
         return None
     source = row["source"]
     if source and source.startswith("arxiv:"):
         arxiv_id = source[len("arxiv:"):]
         if arxiv_id:
-            return f"https://www.semanticscholar.org/arXiv:{arxiv_id}"
+            return f"https://arxiv.org/abs/{arxiv_id}"
     return None
 
 
@@ -484,14 +488,26 @@ async def lifespan(_app: FastAPI):
     tasks: list[asyncio.Task] = []
     with db.tx() as conn:
         empty = conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 0
-    if empty:
-        async def _initial():
+
+    async def _boot_ingest(do_initial: bool):
+        # Seed the curated seminal set first (idempotent + env-gated) so the
+        # "Most Cited" feed gets real heavyweights with large OpenAlex counts.
+        try:
+            seeded = await asyncio.to_thread(ingest.seed_and_enrich)
+            if seeded:
+                log.info("seeded %d seminal papers", seeded)
+        except Exception:
+            log.exception("seed_and_enrich failed")
+        if do_initial:
             try:
                 n = await asyncio.to_thread(ingest.ingest_once)
                 log.info("initial ingest: %d posts", n)
             except Exception:
                 log.exception("initial ingest failed")
-        tasks.append(asyncio.create_task(_initial()))
+
+    # Always run the boot task: it seeds on every start (idempotent) and does a
+    # first crawl only when the restored DB is empty.
+    tasks.append(asyncio.create_task(_boot_ingest(empty)))
     if float(os.environ.get("ARXIVMEDIA_INGEST_MINUTES", "30")) > 0:
         tasks.append(asyncio.create_task(ingest.ingest_loop()))
     # Periodic DB snapshot to the HF Dataset (no-op when persistence disabled).
