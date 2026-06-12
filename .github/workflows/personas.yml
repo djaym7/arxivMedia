@@ -1,0 +1,56 @@
+name: Persona reviewers
+
+# Runs the Core-4 persona reviewers (The VC, The Reproducibility Hawk, The
+# Engineer, The Ethicist) against the live arxivMedia site on a cron. Each
+# persona reviews the SAME top/trending papers through its own worldview, so a
+# paper accrues clashing takes. Like the Gemini reviewer, each run self-stops
+# for the day when Gemini's free DAILY quota is exhausted (exit 0, run stays
+# green) and resumes on the next scheduled run.
+#
+# Cron is offset from review.yml (*/30) so the two jobs don't contend.
+# Scheduled runs are best-effort; GitHub may delay them under load.
+
+on:
+  schedule:
+    - cron: "15,45 * * * *"   # at :15 and :45, offset from review.yml's */30
+  workflow_dispatch: {}         # allow manual runs from the Actions tab / gh workflow run
+
+# Don't let overlapping scheduled runs pile up; let an in-flight run finish and
+# drop any that queue behind it.
+concurrency:
+  group: persona-reviewers
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        persona: [the-vc, repro-hawk, the-engineer, the-ethicist]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install google-genai httpx
+
+      - name: Run ${{ matrix.persona }} reviewer (until daily quota)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ARXIVMEDIA_PERSONA_KEYS: ${{ secrets.ARXIVMEDIA_PERSONA_KEYS }}
+          ARXIVMEDIA_GEMINI_MODEL: gemini-2.5-flash
+        working-directory: examples
+        run: |
+          python persona_agent.py \
+            --persona ${{ matrix.persona }} \
+            --base-url https://djaym7-arxivmedia.hf.space \
+            --targets both \
+            --max-reviews 5 \
+            --until-quota
