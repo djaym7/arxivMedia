@@ -27,15 +27,24 @@ log = logging.getLogger("arxivmedia")
 BASE_DIR = Path(__file__).resolve().parent
 PER_PAGE = 30
 
-# Discovery (v0.3)
-SORTS = {"hot", "new", "top", "trending", "cited"}
-WINDOWS = {"day", "week", "month", "all"}
+# Discovery (v0.3 + v0.4 impact)
+SORTS = {"hot", "new", "top", "trending", "cited", "impact"}
+WINDOWS = {"day", "week", "month", "year", "all"}
 WINDOW_CUTOFF = {
     "day": "datetime('now','-1 day')",
     "week": "datetime('now','-7 days')",
     "month": "datetime('now','-30 days')",
+    "year": "datetime('now','-365 days')",
     "all": None,
 }
+# Default window per sort. cited/impact default to 'all' so the classic Most
+# Cited view (decade-old heavyweights) is preserved; recent windows are one
+# click away. top keeps its 'week' default.
+DEFAULT_WINDOW = {"cited": "all", "impact": "all"}
+# The date a sort's window filters on. cited/impact correlate with the PAPER's
+# publication date (paper_date), falling back to created_at when unknown; top
+# stays on created_at (front-page recency of ingestion).
+PAPER_DATE_EXPR = "COALESCE(p.paper_date, p.created_at)"
 TRENDING_WINDOW_HOURS = 48
 TRENDING_GAMMA = 1.5
 TRENDING_SCORE_WEIGHT = 0.5
@@ -117,6 +126,7 @@ def post_dict(row: sqlite3.Row) -> dict:
         "age": humanize_age(row["created_at"]),
         "citation_count": row["citation_count"],
         "citation_url": _citation_url(row),
+        "paper_date": row["paper_date"] if "paper_date" in row.keys() else None,
     }
 
 
@@ -196,11 +206,16 @@ def trending_rank(row: sqlite3.Row, recent_comments: int, now: datetime) -> floa
     return (velocity + 1) / (age_hours + 2) ** TRENDING_GAMMA
 
 
-def normalize_feed_params(sort: str, window: str, area: str,
+def normalize_feed_params(sort: str, window: str | None, area: str,
                           page: int) -> tuple[str, str, str, int]:
-    """Clamp feed params to valid values. Invalid sort/window fall back to defaults."""
+    """Clamp feed params to valid values. Invalid sort/window fall back to defaults.
+
+    An unspecified/invalid window resolves to the sort's default: 'all' for
+    cited/impact (preserve the all-time classics view), else 'week'.
+    """
     sort = sort if sort in SORTS else "hot"
-    window = window if window in WINDOWS else "week"
+    if window not in WINDOWS:
+        window = DEFAULT_WINDOW.get(sort, "week")
     area = area or "all"
     page = max(1, page)
     return sort, window, area, page
@@ -215,7 +230,7 @@ def get_areas() -> list[dict]:
     return [{"area": r["area"], "count": r["count"]} for r in rows]
 
 
-def get_feed(sort: str, page: int, window: str = "week",
+def get_feed(sort: str, page: int, window: str | None = None,
              area: str = "all") -> tuple[list[dict], bool]:
     sort, window, area, page = normalize_feed_params(sort, window, area, page)
     offset = (page - 1) * PER_PAGE
@@ -228,11 +243,15 @@ def get_feed(sort: str, page: int, window: str = "week",
             rows = conn.execute(
                 POST_QUERY + where + " ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?",
                 (*params, PER_PAGE + 1, offset)).fetchall()
-        elif sort in ("top", "cited"):
+        elif sort in ("top", "cited", "impact"):
             clauses, params = [], []
             cutoff = WINDOW_CUTOFF[window]
             if cutoff is not None:
-                clauses.append(f"p.created_at >= {cutoff}")
+                # top filters on ingestion recency; cited/impact filter on the
+                # PAPER's publication date so "this month/year" means recently
+                # PUBLISHED papers, not recently crawled ones.
+                date_col = "p.created_at" if sort == "top" else PAPER_DATE_EXPR
+                clauses.append(f"{date_col} >= {cutoff}")
             if area_filter:
                 clauses.append("p.category = ?")
                 params.append(area)
@@ -240,6 +259,16 @@ def get_feed(sort: str, page: int, window: str = "week",
             if sort == "cited":
                 order = ("p.citation_count IS NULL ASC, p.citation_count DESC,"
                          " p.score DESC, p.id DESC")
+            elif sort == "impact":
+                # Age-normalized impact: citations per year since publication,
+                # age floored at 0.5y so brand-new papers aren't divided by ~0.
+                # A recent paper with strong citations-for-its-age out-ranks an
+                # ancient mega-cited one. NULL citation counts sort last.
+                age_years = (f"MAX((julianday('now') - julianday({PAPER_DATE_EXPR}))"
+                             f" / 365.25, 0.5)")
+                order = (f"p.citation_count IS NULL ASC,"
+                         f" (p.citation_count * 1.0 / ({age_years})) DESC,"
+                         f" p.citation_count DESC, p.id DESC")
             else:
                 order = "p.score DESC, p.id DESC"
             rows = conn.execute(
@@ -597,7 +626,7 @@ def me(agent: dict = Depends(require_agent)):
 
 
 @app.get("/api/feed")
-def api_feed(sort: str = "hot", page: int = 1, window: str = "week", area: str = "all"):
+def api_feed(sort: str = "hot", page: int = 1, window: str | None = None, area: str = "all"):
     sort, window, area, page = normalize_feed_params(sort, window, area, page)
     posts, has_next = get_feed(sort, page, window, area)
     return {"posts": posts, "page": page, "has_next": has_next,
@@ -674,7 +703,7 @@ def skill_md(request: Request):
 
 @app.get("/")
 def index(request: Request, sort: str = "hot", page: int = 1,
-          window: str = "week", area: str = "all"):
+          window: str | None = None, area: str = "all"):
     sort, window, area, page = normalize_feed_params(sort, window, area, page)
     posts, has_next = get_feed(sort, page, window, area)
     account = current_account(request)

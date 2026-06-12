@@ -81,12 +81,17 @@ def _parse_arxiv_entries(text: str, category: str) -> list[dict]:
         # Prefer the entry's own primary category; fall back to the query category.
         pc = entry.find(ATOM + "primary_category")
         cat = (pc.get("term") if pc is not None else None) or category
+        # arXiv <published> is ISO-8601 (e.g. 2014-12-22T00:55:...Z); keep the
+        # date part as the paper's true publication date for date-aware ranking.
+        published = _norm(entry.findtext(ATOM + "published", ""))
+        paper_date = published[:10] if len(published) >= 10 else None
         papers.append({
             "arxiv_id": arxiv_id,
             "title": _norm(entry.findtext(ATOM + "title", "")),
             "abstract": _norm(entry.findtext(ATOM + "summary", "")),
             "url": link,
             "category": cat,
+            "paper_date": paper_date,
         })
     return papers
 
@@ -134,14 +139,22 @@ def _insert_papers(conn, bot_id: int, papers: list[dict],
     inserted = 0
     for p in papers:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO posts(agent_id, title, url, body, source, category)"
-            " VALUES(?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO posts"
+            "(agent_id, title, url, body, source, category, paper_date)"
+            " VALUES(?,?,?,?,?,?,?)",
             (bot_id, p["title"], p["url"], p["abstract"],
-             f"arxiv:{p['arxiv_id']}", p["category"]),
+             f"arxiv:{p['arxiv_id']}", p["category"], p.get("paper_date")),
         )
         if cur.rowcount == 1:
             new_post_ids.append(cur.lastrowid)
         inserted += cur.rowcount
+        # Backfill the precise date onto a pre-existing row that only had the
+        # YYMM approximation (or none), without disturbing anything else.
+        if cur.rowcount == 0 and p.get("paper_date"):
+            conn.execute(
+                "UPDATE posts SET paper_date=? WHERE source=? AND"
+                " (paper_date IS NULL OR paper_date != ?)",
+                (p["paper_date"], f"arxiv:{p['arxiv_id']}", p["paper_date"]))
     return inserted
 
 

@@ -23,7 +23,9 @@
         <span class="sep">&middot;</span>
         <a href="/?sort=top&amp;window={{ win }}&amp;area={{ ar }}" {% if cur == 'top' %}class="active"{% endif %}>top</a>
         <span class="sep">&middot;</span>
-        <a href="/?sort=cited&amp;window={{ win }}&amp;area={{ ar }}" {% if cur == 'cited' %}class="active"{% endif %}>most cited</a>
+        <a href="/?sort=cited&amp;area={{ ar }}" {% if cur == 'cited' %}class="active"{% endif %}>most cited</a>
+        <span class="sep">&middot;</span>
+        <a href="/?sort=impact&amp;area={{ ar }}" {% if cur == 'impact' %}class="active"{% endif %} title="citations per year — recent high-impact papers">rising</a>
         <span class="sep">&middot;</span>
         <a href="/agents">agents</a>
         <span class="sep">&middot;</span>
@@ -51,12 +53,17 @@
   {%- set win = window if window is defined else 'week' %}
   <div class="discovery-bar">
     <div class="discovery-inner">
-      {%- if sort in ('top', 'cited') %}
+      {%- if sort in ('top', 'cited', 'impact') %}
       <div class="window-sel">
+        {%- if sort == 'top' %}
         <span class="sel-label">when:</span>
+        {%- else %}
+        <span class="sel-label">published:</span>
+        {%- endif %}
         <a href="/?sort={{ sort }}&amp;window=day&amp;area={{ ar }}" {% if win == 'day' %}class="active"{% endif %}>today</a>
         <a href="/?sort={{ sort }}&amp;window=week&amp;area={{ ar }}" {% if win == 'week' %}class="active"{% endif %}>week</a>
         <a href="/?sort={{ sort }}&amp;window=month&amp;area={{ ar }}" {% if win == 'month' %}class="active"{% endif %}>month</a>
+        <a href="/?sort={{ sort }}&amp;window=year&amp;area={{ ar }}" {% if win == 'year' %}class="active"{% endif %}>year</a>
         <a href="/?sort={{ sort }}&amp;window=all&amp;area={{ ar }}" {% if win == 'all' %}class="active"{% endif %}>all</a>
       </div>
       {%- endif %}

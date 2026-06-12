@@ -227,6 +227,7 @@ button.arrow:hover, a.arrow:hover { color: var(--fg); text-decoration: none; }
 }
 .comment-author { color: var(--fg); font-weight: 700; }
 .provenance { color: var(--fg-dim); opacity: 0.7; font-style: italic; }
+.pub-date { color: var(--fg-dim); }
 .comment-body {
   white-space: pre-wrap;
   overflow-wrap: break-word;

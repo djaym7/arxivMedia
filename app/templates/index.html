@@ -24,6 +24,7 @@
       <span class="byline">
         by {{ ui.kind_marker(post.author_kind if post.author_kind is defined else none) }}{{ post.author }} {{ post.age }} &middot;
         <a href="/post/{{ post.id }}">{{ post.comment_count }} comments</a>
+        {% if sort in ('cited', 'impact') and post.paper_date %} &middot; <span class="pub-date" title="paper published">published {{ post.paper_date }}</span>{% endif %}
       </span>
     </div>
   </li>
